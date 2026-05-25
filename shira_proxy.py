@@ -189,41 +189,6 @@ mark { background: #fff176; border-radius: 2px; padding: 0 1px; }
 .mode-banner { border-radius: 8px; padding: 8px 14px; font-size: 12px; margin-bottom: 16px; font-weight: 500; }
 .mode-banner-user { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
 .mode-banner-dev  { background: #fff8e1; color: #e65100; border: 1px solid #ffe0b2; }
-.progress-bar {
-  width: 100%; height: 8px;
-  background: #e0e4ea; border-radius: 4px;
-  overflow: hidden; margin-top: 10px;
-}
-.progress-fill {
-  height: 100%; background: linear-gradient(90deg, #1a3a5c 0%, #2c5d8f 100%);
-  border-radius: 4px; width: 0%;
-  transition: width 0.25s ease;
-}
-#ai-loading-banner {
-  position: fixed; top: 70px; left: 50%;
-  transform: translateX(-50%);
-  z-index: 1000;
-  background: #fff;
-  border: 1px solid #1a3a5c;
-  border-radius: 10px;
-  padding: 14px 18px;
-  box-shadow: 0 6px 24px rgba(26,58,92,0.2);
-  display: none;
-  min-width: 380px;
-  max-width: 600px;
-  direction: rtl;
-}
-#ai-loading-banner.visible { display: block; animation: bannerIn 0.2s ease; }
-@keyframes bannerIn { from { opacity: 0; transform: translate(-50%, -10px); } to { opacity: 1; transform: translate(-50%, 0); } }
-#ai-loading-banner .row-line { display: flex; align-items: center; gap: 12px; }
-#ai-loading-banner .status-text { flex: 1; font-size: 13px; color: #1a3a5c; font-weight: 500; line-height: 1.4; }
-#ai-loading-banner .status-sub { font-size: 11px; color: #888; margin-top: 2px; font-weight: 400; }
-#ai-loading-banner .stop-btn {
-  background: #c62828; color: #fff; border: 1px solid #c62828;
-  height: 34px; padding: 0 16px; font-size: 12px; font-weight: 600;
-  border-radius: 7px; cursor: pointer; transition: background 0.15s;
-}
-#ai-loading-banner .stop-btn:hover { background: #b71c1c; }
 </style>
 </head>
 <body>
@@ -251,19 +216,6 @@ mark { background: #fff176; border-radius: 2px; padding: 0 1px; }
     <button onclick="document.getElementById('usage-popup').style.display='none'" style="height:24px;padding:0 8px;font-size:12px;border-radius:6px;">✕</button>
   </div>
   <div id="usage-content" style="font-size:13px;color:#444;line-height:2;">טוען...</div>
-</div>
-
-<!-- Fixed loading banner — always visible during AI doc loading -->
-<div id="ai-loading-banner">
-  <div class="row-line">
-    <span class="spinner"></span>
-    <div style="flex:1;">
-      <div class="status-text" id="ai-loading-text">טוען...</div>
-      <div class="status-sub" id="ai-loading-sub"></div>
-    </div>
-    <button class="stop-btn" onclick="stopAI()">⏹ עצור</button>
-  </div>
-  <div class="progress-bar"><div class="progress-fill" id="ai-loading-fill"></div></div>
 </div>
 
 <div class="container">
@@ -895,9 +847,18 @@ function renderAITab() {
       <div class="row">
         <input type="text" id="ai-q" placeholder='לדוגמה: "מה הסוגיות המרכזיות?" או "סכם פרוטוקול מ-15/3/2025"' />
         <button class="primary" id="ai-ask-btn" onclick="askAI()">✨ שאל</button>
-        <button class="sm" id="ai-stop-btn" onclick="stopAI()" style="display:none;position:fixed;top:80px;left:24px;z-index:1100;background:#c62828;color:#fff;border-color:#c62828;height:38px;padding:0 18px;font-size:13px;font-weight:600;box-shadow:0 4px 12px rgba(198,40,40,0.4);">⏹ עצור</button>
+        <button class="sm" id="ai-stop-btn" onclick="stopAI()" style="display:none;background:#c62828;color:#fff;border-color:#c62828;">⏹ עצור</button>
       </div>
       <div id="ai-filter-info" style="font-size:11px;color:#1a3a5c;margin-top:6px;display:none;"></div>
+    </div>
+    <div id="ai-progress-wrap" style="display:none;margin-top:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+        <span id="ai-progress-text" style="font-size:11px;color:#555;"></span>
+        <span style="font-size:11px;color:#aaa;" id="ai-progress-pct"></span>
+      </div>
+      <div style="background:#e0e4ea;border-radius:4px;height:6px;overflow:hidden;">
+        <div id="ai-progress-bar" style="height:6px;background:#1a3a5c;border-radius:4px;width:0%;transition:width 0.3s ease;"></div>
+      </div>
     </div>
     <div id="ai-ans-wrap" style="margin-top:14px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -957,93 +918,56 @@ function extractDatesFromQuestion(q) {
   return dates;
 }
 
-// ── Parse a DD/MM/YYYY date string into a timestamp ──────────────────────────
-function parseDocDate(s) {
-  const m = (s || '').match(/(\\d{1,2})[\\/\\-\\.](\\d{1,2})[\\/\\-\\.](\\d{2,4})/);
-  if (!m) return 0;
-  let y = m[3]; if (y.length === 2) y = '20' + y;
-  return new Date(parseInt(y,10), parseInt(m[2],10)-1, parseInt(m[1],10)).getTime();
-}
-
-function sortDocsByRecency(docs, ascending) {
-  return [...docs].sort((a, b) => {
-    const ta = parseDocDate(a.date), tb = parseDocDate(b.date);
-    return ascending ? ta - tb : tb - ta;
-  });
-}
-
-// Document-type synonym groups — each group represents one legal-document category.
-// The question is scanned for any term in the group; matched groups expand the filter.
-const AI_DOC_GROUPS = [
-  { label: 'פרוטוקול',  terms: ['פרוטוקול','פרוטוקולים','פרטיכל','דיון','דיונים','ישיבה','ישיבת בית הדין'] },
-  { label: 'החלטה',     terms: ['החלטה','החלטות','החלטת','הוראה','הוראת'] },
-  { label: 'פסק דין',   terms: ['פסק דין','פס"ד','פסה"ד','פסק-דין','פסיקה','פסק'] },
-  { label: 'כתב תביעה', terms: ['כתב תביעה','כתב-תביעה','תביעה','תביעת'] },
-  { label: 'כתב הגנה',  terms: ['כתב הגנה','כתב-הגנה','הגנה','כתב תשובה'] },
-  { label: 'תצהיר',     terms: ['תצהיר','תצהירים'] },
-  { label: 'חוות דעת',  terms: ['חוות דעת','חוות-דעת','חוו"ד','חו"ד'] },
-  { label: 'הסכם',      terms: ['הסכם','הסכמים','הסכמה','הסכם גירושין','הסכם ממון','הסכם שלום'] },
-  { label: 'בקשה',      terms: ['בקשה','בקשות'] },
-  { label: 'תגובה',     terms: ['תגובה','תגובות','מענה'] },
-  { label: 'זימון',     terms: ['זימון','זימונים','הזמנה לדיון'] },
-  { label: 'עיקול',     terms: ['עיקול','עיקולים','צו עיקול'] },
-  { label: 'מזונות',    terms: ['מזונות','דמי מזונות'] },
-];
-
-// ── Filter docs by date / keyword / recency — returns up to MAX_DOCS ────────
+// ── Filter docs by date or keyword ───────────────────────────────────────────
 function filterDocsForAI(q) {
-  const MAX_DOCS = 10;
   const dates = extractDatesFromQuestion(q);
+  const MAX_DOCS = 20; // Gemini supports large context
 
-  // Recency / scope hints
-  const wantsLatest   = /(אחרון|אחרונה|אחרונים|אחרונות|האחרון|האחרונה|חדש|חדשה|חדשים|לאחרונה|עדכני|עדכניים)/.test(q);
-  const wantsEarliest = /(ראשון|ראשונה|ראשונים|ראשונות|המקורי|הראשון|הראשונה|המוקדם|המוקדמת)/.test(q);
-  const wantsAll      = /(כל המסמכים|כל הפרוטוקולים|כל ההחלטות|כל התיק|הכל)/.test(q);
+  // Check for multiple doc types mentioned
+  const docTypes = ['פרוטוקול', 'החלטה', 'כתב תביעה', 'כתב הגנה', 'תצהיר', 'חוות דעת', 'הסכם', 'פסק דין'];
 
-  // 1. Date-specific filter (highest priority)
+  // Filter by date(s) first
   if (dates.length > 0) {
     const filtered = caseDocs.filter(d => dates.some(dt => d.date === dt));
     if (filtered.length > 0) {
-      return {
-        docs: filtered.slice(0, MAX_DOCS),
-        filterDesc: `🗓 סינון לפי תאריך: ${dates.join(', ')} — ${filtered.length} מסמך/ים`
-      };
+      // Within date filter, further filter by doc type if mentioned
+      for (const kw of docTypes) {
+        if (q.includes(kw)) {
+          const typed = filtered.filter(d => d.name.includes(kw));
+          if (typed.length > 0) {
+            return { docs: typed.slice(0, MAX_DOCS), filterDesc: `סינון: תאריך ${dates.join(', ')} + סוג "${kw}" — ${typed.length} מסמך/ים` };
+          }
+        }
+      }
+      return { docs: filtered.slice(0, MAX_DOCS), filterDesc: `סינון לפי תאריך: ${dates.join(', ')} — ${filtered.length} מסמך/ים` };
     }
     return { docs: [], filterDesc: `⚠️ לא נמצאו מסמכים בתאריך ${dates.join(', ')}` };
   }
 
-  // 2. Document-type synonym filter
-  const matchedGroups = AI_DOC_GROUPS.filter(g => g.terms.some(t => q.includes(t)));
-  if (matchedGroups.length > 0) {
-    const filtered = caseDocs.filter(d =>
-      matchedGroups.some(g => g.terms.some(t => d.name.includes(t)))
-    );
-    if (filtered.length > 0) {
-      const sorted  = sortDocsByRecency(filtered, wantsEarliest);
-      const limited = sorted.slice(0, MAX_DOCS);
-      const labels  = matchedGroups.map(g => g.label).join(' / ');
-      let desc;
-      if (wantsLatest && filtered.length > limited.length) {
-        desc = `📂 ${labels} — ${limited.length} מתוך ${filtered.length} (האחרונים)`;
-      } else if (wantsEarliest && filtered.length > limited.length) {
-        desc = `📂 ${labels} — ${limited.length} מתוך ${filtered.length} (הראשונים)`;
-      } else if (filtered.length > limited.length) {
-        desc = `📂 ${labels} — ${limited.length} מתוך ${filtered.length} מסמכים`;
-      } else {
-        desc = `📂 ${labels} — ${limited.length} מסמך/ים`;
-      }
-      return { docs: limited, filterDesc: desc };
+  // No date — check for doc type keywords
+  const matchedTypes = [];
+  for (const kw of docTypes) {
+    if (q.includes(kw)) {
+      const filtered = caseDocs.filter(d => d.name.includes(kw));
+      matchedTypes.push(...filtered);
     }
   }
+  if (matchedTypes.length > 0) {
+    const unique = [...new Map(matchedTypes.map(d => [d.docId, d])).values()];
+    return { docs: unique.slice(0, MAX_DOCS), filterDesc: `סינון לפי סוג מסמך — ${unique.length} מסמך/ים` };
+  }
 
-  // 3. No keyword/date match — fall back to recency-sorted top N
-  const sorted = sortDocsByRecency(caseDocs, wantsEarliest);
-  const recent = sorted.slice(0, MAX_DOCS);
-  const scopeLabel = wantsEarliest ? 'הראשונים' : 'האחרונים';
+  // Check for "כל התיק" or "סכם הכל"
+  if (q.includes('כל התיק') || q.includes('סכם הכל') || q.includes('כל המסמכים')) {
+    return { docs: caseDocs.slice(0, MAX_DOCS), filterDesc: `כל התיק — ${Math.min(caseDocs.length, MAX_DOCS)} מסמכים (מתוך ${caseDocs.length})` };
+  }
+
+  // Default — most recent docs
+  const recent = [...caseDocs].slice(0, 10);
   return {
     docs: recent,
-    filterDesc: caseDocs.length > MAX_DOCS
-      ? `⚠️ ${caseDocs.length} מסמכים בתיק — מציג ${MAX_DOCS} ${scopeLabel}. לדיוק רב יותר, ציין סוג מסמך (פרוטוקול / החלטה / וכו') או תאריך.`
+    filterDesc: caseDocs.length > 10
+      ? `⚠️ ${caseDocs.length} מסמכים בתיק — טוען 10 האחרונים. ציין תאריך, סוג, או "כל התיק" לשליטה מדויקת.`
       : `${caseDocs.length} מסמכים בתיק`
   };
 }
@@ -1061,7 +985,6 @@ function stopAI() {
   }
   document.getElementById('ai-ask-btn').style.display = '';
   document.getElementById('ai-stop-btn').style.display = 'none';
-  document.getElementById('ai-loading-banner').classList.remove('visible');
 }
 
 async function askAI() {
@@ -1072,11 +995,12 @@ async function askAI() {
   const askBtn  = document.getElementById('ai-ask-btn');
   const stopBtn = document.getElementById('ai-stop-btn');
   const filterInfo = document.getElementById('ai-filter-info');
+  const progressWrap = document.getElementById('ai-progress-wrap');
+  const progressBar  = document.getElementById('ai-progress-bar');
+  const progressText = document.getElementById('ai-progress-text');
 
-  // Determine which docs to use
   const { docs: docsToUse, filterDesc } = filterDocsForAI(q);
 
-  // Show filter info
   filterInfo.textContent = filterDesc;
   filterInfo.style.display = 'block';
 
@@ -1087,42 +1011,38 @@ async function askAI() {
     return;
   }
 
-  // Show stop button
   askBtn.style.display = 'none';
   stopBtn.style.display = '';
+  stopBtn.disabled = false;
 
-  // Show fixed loading banner with progress bar (always visible during loading)
-  const banner    = document.getElementById('ai-loading-banner');
-  const bannerTxt = document.getElementById('ai-loading-text');
-  const bannerSub = document.getElementById('ai-loading-sub');
-  const bannerFil = document.getElementById('ai-loading-fill');
-  banner.classList.add('visible');
-  bannerFil.style.width = '0%';
-
+  progressWrap.style.display = 'block';
+  progressBar.style.width = '0%';
   ans.className = 'ai-box loading';
-  ans.textContent = `טוען ${docsToUse.length} מסמך/ים...`;
+  ans.textContent = '';
 
-  // Load only the filtered docs
-  for (let i = 0; i < docsToUse.length; i++) {
-    const doc = docsToUse[i];
-    bannerTxt.textContent = `טוען מסמך ${i+1} מתוך ${docsToUse.length}`;
-    bannerSub.textContent = doc.name;
-    bannerFil.style.width = `${(i / docsToUse.length) * 100}%`;
+  const toLoad = docsToUse.filter(d => !docTexts[d.docId]);
+  const totalToLoad = toLoad.length;
+  let loaded = 0;
+
+  for (const doc of docsToUse) {
     if (!docTexts[doc.docId]) {
       try {
-        ans.textContent = `טוען: ${doc.name}...`;
+        loaded++;
+        const pct = Math.round((loaded / Math.max(totalToLoad, 1)) * 80);
+        progressBar.style.width = pct + '%';
+        progressText.textContent = `טוען מסמך ${loaded} מתוך ${totalToLoad}: ${doc.name}`;
         const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`);
         const d = await r.json();
         docTexts[doc.docId] = d.text || '';
       } catch { docTexts[doc.docId] = ''; }
     }
   }
-  bannerFil.style.width = '100%';
-  bannerTxt.textContent = 'שולח שאלה ל-AI...';
-  bannerSub.textContent = '';
+
+  progressBar.style.width = '85%';
+  progressText.textContent = 'שולח ל-Gemini...';
 
   const combined = docsToUse
-    .map(d => `[${d.name} | ${d.date}]:\\n${(docTexts[d.docId]||'').substring(0, 40000)}`)
+    .map(d => `[${d.name} | ${d.date}]:\\n${(docTexts[d.docId]||'')}`)
     .join('\\n\\n');
 
   try {
@@ -1141,8 +1061,14 @@ async function askAI() {
   } finally {
     askBtn.style.display = '';
     stopBtn.style.display = 'none';
-    document.getElementById('ai-loading-banner').classList.remove('visible');
     aiAbortController = null;
+    // Hide progress bar
+    const pw = document.getElementById('ai-progress-wrap');
+    const pb = document.getElementById('ai-progress-bar');
+    if (pw) {
+      pb.style.width = '100%';
+      setTimeout(() => { pw.style.display = 'none'; pb.style.width = '0%'; }, 600);
+    }
   }
 }
 // ── Streaming AI call ─────────────────────────────────────────────────────────
