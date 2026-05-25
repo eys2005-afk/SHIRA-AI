@@ -570,7 +570,7 @@ async function doCaseSearch() {
 // ── Select case ───────────────────────────────────────────────────────────────
 async function selectCase(idx) {
   selectedCase = window._cases[idx];
-  caseDocs = []; docTexts = {};
+  caseDocs = []; docTexts = {}; _preloadAbort = true;
   document.getElementById('tab-ai').innerHTML = '';  // clear so renderAITab re-runs for new case
   document.querySelectorAll('tr[data-idx]').forEach(r => r.classList.remove('selected'));
   document.querySelector(`tr[data-idx="${idx}"]`)?.classList.add('selected');
@@ -595,7 +595,36 @@ async function loadDocs() {
     const data = await r.json();
     caseDocs = data.error ? [] : data;
     if (document.getElementById('tab-docs').style.display !== 'none') renderDocs('');
+    // Start background preloading after docs list is ready
+    preloadDocTexts();
   } catch { caseDocs = []; }
+}
+
+// ── Background preloading ─────────────────────────────────────────────────────
+let _preloadAbort = false;
+async function preloadDocTexts() {
+  _preloadAbort = false;
+  const toLoad = caseDocs.filter(d => !docTexts[d.docId]);
+  if (!toLoad.length) return;
+  console.log(`[preload] starting background load of ${toLoad.length} docs`);
+  for (const doc of toLoad) {
+    if (_preloadAbort) break;
+    if (docTexts[doc.docId]) continue;
+    try {
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`, { signal: ctrl.signal });
+        clearTimeout(tid);
+        const d = await r.json();
+        docTexts[doc.docId] = d.text || '';
+      } catch { clearTimeout(tid); docTexts[doc.docId] = ''; }
+    } catch { docTexts[doc.docId] = ''; }
+    // Small delay to avoid overwhelming the server
+    await new Promise(res => setTimeout(res, 150));
+  }
+  console.log(`[preload] done — ${Object.keys(docTexts).length} docs in memory`);
+  renderAIDocList(); // refresh checkmarks
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -831,6 +860,7 @@ function renderSearchHits(hits, q, area, caseNumber) {
 
 // ── AI tab ────────────────────────────────────────────────────────────────────
 let aiAbortController = null;
+let aiSelectedDocs = new Set(); // manually selected doc IDs
 
 function renderAITab() {
   const el = document.getElementById('tab-ai');
@@ -839,13 +869,30 @@ function renderAITab() {
   const caseKey = `ai_${selectedCase.fullFileMainNumber || selectedCase.fileNumber}`;
 
   el.innerHTML = `
-    <div style="margin-bottom:16px">
-      <p style="font-size:12px;color:#888;margin-bottom:4px;">שאלה חופשית על התיק</p>
-      <p style="font-size:11px;color:#aaa;margin-bottom:8px;">
-        💡 ניתן לציין תאריך לסינון אוטומטי — לדוגמה: "סכם את הפרוטוקול מ-24/5/2026"
-      </p>
+    <div style="margin-bottom:12px;">
+      <p style="font-size:12px;color:#888;margin-bottom:8px;">שאלה חופשית על התיק</p>
+
+      <!-- Document selector panel -->
+      <div style="border:1px solid #e0e4ea;border-radius:8px;padding:12px;margin-bottom:12px;background:#f8f9fb;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px;">
+          <span style="font-size:12px;font-weight:600;color:#1a3a5c;">📋 בחר מסמכים לסיכום</span>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="sm" onclick="aiSelectRecent(5)"  style="font-size:11px;">5 אחרונים</button>
+            <button class="sm" onclick="aiSelectRecent(10)" style="font-size:11px;">10 אחרונים</button>
+            <button class="sm" onclick="aiSelectRecent(20)" style="font-size:11px;">20 אחרונים</button>
+            <button class="sm" onclick="aiSelectAll()"      style="font-size:11px;background:#e8f5e9;border-color:#c8e6c9;color:#2e7d32;">כל התיק ⚠️</button>
+            <button class="sm" onclick="aiSelectNone()"     style="font-size:11px;color:#888;">נקה</button>
+          </div>
+        </div>
+        <input type="text" id="ai-doc-filter" placeholder="סנן לפי שם מסמך..." oninput="renderAIDocList()"
+          style="width:100%;margin-bottom:8px;height:32px;font-size:12px;" />
+        <div id="ai-doc-list" style="max-height:200px;overflow-y:auto;border:1px solid #e0e4ea;border-radius:6px;background:#fff;"></div>
+        <div id="ai-doc-count" style="font-size:11px;color:#1a3a5c;margin-top:6px;font-weight:600;"></div>
+      </div>
+
+      <!-- Question input -->
       <div class="row">
-        <input type="text" id="ai-q" placeholder='לדוגמה: "מה הסוגיות המרכזיות?" או "סכם פרוטוקול מ-15/3/2025"' />
+        <input type="text" id="ai-q" placeholder='לדוגמה: "מה הסוגיות המרכזיות?" או "סכם את הפרוטוקול"' />
         <button class="primary" id="ai-ask-btn" onclick="askAI()">✨ שאל</button>
         <button class="sm" id="ai-stop-btn" onclick="stopAI()" style="display:none;background:#c62828;color:#fff;border-color:#c62828;">⏹ עצור</button>
       </div>
@@ -854,7 +901,6 @@ function renderAITab() {
     <div id="ai-progress-wrap" style="display:none;margin-top:10px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
         <span id="ai-progress-text" style="font-size:11px;color:#555;"></span>
-        <span style="font-size:11px;color:#aaa;" id="ai-progress-pct"></span>
       </div>
       <div style="background:#e0e4ea;border-radius:4px;height:6px;overflow:hidden;">
         <div id="ai-progress-bar" style="height:6px;background:#1a3a5c;border-radius:4px;width:0%;transition:width 0.3s ease;"></div>
@@ -873,6 +919,11 @@ function renderAITab() {
     </div>
   `;
 
+  // Init doc list
+  aiSelectedDocs = new Set();
+  renderAIDocList();
+  aiSelectRecent(10); // default: last 10
+
   // Restore saved answer if exists
   const saved = sessionStorage.getItem(caseKey);
   if (saved) {
@@ -887,6 +938,66 @@ function renderAITab() {
     const costEl = el.querySelector('.ai-cost');
     if (costEl) costEl.style.display = 'inline';
   }
+}
+
+// ── AI doc selector helpers ───────────────────────────────────────────────────
+function renderAIDocList() {
+  const filter = (document.getElementById('ai-doc-filter')?.value || '').toLowerCase();
+  const list   = document.getElementById('ai-doc-list');
+  const count  = document.getElementById('ai-doc-count');
+  if (!list) return;
+
+  const filtered = caseDocs.filter(d => !filter || d.name.toLowerCase().includes(filter) || d.date.includes(filter));
+
+  if (!filtered.length) {
+    list.innerHTML = '<p style="color:#aaa;font-size:12px;padding:8px;">אין מסמכים</p>';
+    return;
+  }
+
+  list.innerHTML = filtered.map(d => {
+    const checked = aiSelectedDocs.has(d.docId) ? 'checked' : '';
+    const preloaded = docTexts[d.docId] ? '✓' : '';
+    const preloadColor = docTexts[d.docId] ? 'color:#4caf50' : 'color:#ccc';
+    return `<label style="display:flex;align-items:center;gap:8px;padding:5px 8px;cursor:pointer;border-bottom:1px solid #f0f2f5;font-size:12px;" onchange="aiToggleDoc('${d.docId}')">
+      <input type="checkbox" ${checked} style="accent-color:#1a3a5c;width:14px;height:14px;" />
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${d.name}</span>
+      <span style="color:#aaa;font-size:11px;white-space:nowrap;">${d.date}</span>
+      <span style="font-size:10px;${preloadColor}">${preloaded}</span>
+    </label>`;
+  }).join('');
+
+  updateAIDocCount();
+}
+
+function aiToggleDoc(docId) {
+  if (aiSelectedDocs.has(docId)) aiSelectedDocs.delete(docId);
+  else aiSelectedDocs.add(docId);
+  updateAIDocCount();
+}
+
+function updateAIDocCount() {
+  const count = document.getElementById('ai-doc-count');
+  if (!count) return;
+  const n = aiSelectedDocs.size;
+  const warn = n > 50 ? ' — ⚠️ סיכום ייקח זמן רב' : n > 20 ? ' — עיבוד בינוני' : '';
+  count.textContent = n > 0 ? `נבחרו ${n} מסמכים מתוך ${caseDocs.length}${warn}` : 'לא נבחרו מסמכים';
+  count.style.color = n > 50 ? '#e65100' : n > 0 ? '#1a3a5c' : '#aaa';
+}
+
+function aiSelectRecent(n) {
+  aiSelectedDocs = new Set(caseDocs.slice(0, n).map(d => d.docId));
+  renderAIDocList();
+}
+
+function aiSelectAll() {
+  if (!confirm(`בחירת כל ${caseDocs.length} המסמכים עשויה לקחת זמן רב. להמשיך?`)) return;
+  aiSelectedDocs = new Set(caseDocs.map(d => d.docId));
+  renderAIDocList();
+}
+
+function aiSelectNone() {
+  aiSelectedDocs = new Set();
+  renderAIDocList();
 }
 
 async function loadDocTexts() {
@@ -999,7 +1110,16 @@ async function askAI() {
   const progressBar  = document.getElementById('ai-progress-bar');
   const progressText = document.getElementById('ai-progress-text');
 
-  const { docs: docsToUse, filterDesc } = filterDocsForAI(q);
+  // Use manually selected docs, fall back to smart filter if none selected
+  let docsToUse, filterDesc;
+  if (aiSelectedDocs && aiSelectedDocs.size > 0) {
+    docsToUse  = caseDocs.filter(d => aiSelectedDocs.has(d.docId));
+    filterDesc = `נבחרו ידנית ${docsToUse.length} מסמכים`;
+  } else {
+    const result = filterDocsForAI(q);
+    docsToUse  = result.docs;
+    filterDesc = result.filterDesc;
+  }
 
   filterInfo.textContent = filterDesc;
   filterInfo.style.display = 'block';
@@ -1007,7 +1127,7 @@ async function askAI() {
   if (docsToUse.length === 0) {
     ans.className = 'ai-box';
     ans.style.color = '#c62828';
-    ans.textContent = filterDesc;
+    ans.textContent = 'לא נבחרו מסמכים — בחר מסמכים מהרשימה למעלה';
     return;
   }
 
@@ -1031,15 +1151,23 @@ async function askAI() {
         const pct = Math.round((loaded / Math.max(totalToLoad, 1)) * 80);
         progressBar.style.width = pct + '%';
         progressText.textContent = `טוען מסמך ${loaded} מתוך ${totalToLoad}: ${doc.name}`;
-        const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`);
-        const d = await r.json();
-        docTexts[doc.docId] = d.text || '';
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        try {
+          const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`, { signal: controller.signal });
+          clearTimeout(timeoutId);
+          const d = await r.json();
+          docTexts[doc.docId] = d.text || '';
+        } catch {
+          clearTimeout(timeoutId);
+          docTexts[doc.docId] = '';
+        }
       } catch { docTexts[doc.docId] = ''; }
     }
   }
 
-  progressBar.style.width = '85%';
-  progressText.textContent = 'שולח ל-Gemini...';
+  progressBar.style.width = '95%';
+  progressText.textContent = '';
 
   const combined = docsToUse
     .map(d => `[${d.name} | ${d.date}]:\\n${(docTexts[d.docId]||'')}`)
