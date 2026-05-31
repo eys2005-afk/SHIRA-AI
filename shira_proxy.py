@@ -660,21 +660,23 @@ function renderMsgTab() {
   const btnStyle = 'padding:6px 12px;margin:3px;border:1px solid #b0bec5;border-radius:6px;cursor:pointer;font-size:13px;background:#f5f5f5';
   const activeBtnStyle = btnStyle.replace('#f5f5f5','#1a3a5c').replace('border:1px solid #b0bec5','border:1px solid #1a3a5c') + ';color:#fff';
 
-  el.innerHTML = `
-    <div style="padding:16px 0">
-      <div style="margin-bottom:10px;font-weight:600;font-size:14px;color:#1a3a5c">בחר תבנית:</div>
-      <div id="msg-template-btns">
-        ${allTemplates.map((t,i) => `<button style="${i===0?activeBtnStyle:btnStyle}" onclick="selectMsgTemplate(${i})">${t.name}</button>`).join('')}
-        <button style="${btnStyle}" onclick="saveMsgTemplate()">＋ שמור תבנית חדשה</button>
-      </div>
-      <div style="margin-top:14px;margin-bottom:6px;font-weight:600;font-size:14px;color:#1a3a5c">תוכן ההודעה:</div>
-      <textarea id="msg-text" dir="rtl" style="width:100%;height:160px;padding:10px;font-size:14px;font-family:FrankRuehl,Arial;border:1px solid #b0bec5;border-radius:6px;resize:vertical;box-sizing:border-box">${allTemplates[0].text}</textarea>
-      <div style="margin-top:12px;text-align:center">
-        <button id="msg-send-btn" onclick="sendMessage()" style="padding:10px 32px;background:#1a3a5c;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;font-weight:600">📨 שלח הודעה</button>
-      </div>
-      <div id="msg-status" style="margin-top:10px;text-align:center;font-size:13px"></div>
-    </div>`;
+  const templateBtns = allTemplates.map(function(t, i) {
+    const st = i === 0 ? activeBtnStyle : btnStyle;
+    return '<button style="' + st + '" onclick="selectMsgTemplate(' + i + ')">' + t.name + '</button>';
+  }).join('');
 
+  el.innerHTML =
+    '<div style="padding:16px 0">' +
+    '<div style="margin-bottom:10px;font-weight:600;font-size:14px;color:#1a3a5c">בחר תבנית:</div>' +
+    '<div id="msg-template-btns">' + templateBtns +
+    '<button style="' + btnStyle + '" onclick="saveMsgTemplate()">＋ שמור תבנית חדשה</button></div>' +
+    '<div style="margin-top:14px;margin-bottom:6px;font-weight:600;font-size:14px;color:#1a3a5c">תוכן ההודעה:</div>' +
+    '<textarea id="msg-text" dir="rtl" style="width:100%;height:160px;padding:10px;font-size:14px;font-family:FrankRuehl,Arial;border:1px solid #b0bec5;border-radius:6px;resize:vertical;box-sizing:border-box"></textarea>' +
+    '<div style="margin-top:12px;text-align:center">' +
+    '<button id="msg-send-btn" onclick="sendMessage()" style="padding:10px 32px;background:#1a3a5c;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;font-weight:600">📨 שלח הודעה</button>' +
+    '</div><div id="msg-status" style="margin-top:10px;text-align:center;font-size:13px"></div></div>';
+
+  document.getElementById('msg-text').value = allTemplates[0].text;
   window._msgTemplates = allTemplates;
   window._msgSelectedIdx = 0;
 }
