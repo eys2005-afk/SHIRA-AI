@@ -21,7 +21,8 @@ SPFE  = "http://prod-spfe:1000"
 def make_session():
     s = requests.Session()
     s.auth = HttpNegotiateAuth()
-    s.trust_env = False   # ignore system proxy settings
+    s.trust_env = False
+    s.proxies = {}        # explicitly clear all proxies
     s.verify = False
     return s
 
@@ -32,10 +33,14 @@ def main():
 
     session = make_session()
 
-    # Test 1: Basic connectivity — load a classic Shira page
+    # Test 1: Basic connectivity — use a URL we know exists
     print("\n[1] Basic connectivity to Shira...")
     try:
-        r = session.get(f"{SHIRA}/classic/Forms/File/Files/FilesList.aspx", timeout=10)
+        r = session.get(
+            f"{SHIRA}/classic/Forms/File/Request/FileRequest.aspx"
+            f"?FileRequestID=0&FileID=2923739",
+            timeout=10
+        )
         print(f"    Status : {r.status_code}")
         if r.status_code == 200:
             print("    ✅ Shira reachable and authenticated")
