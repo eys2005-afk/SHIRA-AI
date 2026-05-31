@@ -1,5 +1,5 @@
 """
-Phase A — Step 2  (v3)
+Phase A — Step 2  (v6)
 Discover how to create a document record in Shira.
 Run AFTER step 1 passes.
 
@@ -7,7 +7,7 @@ Run:
     python phase_a_step2.py
 """
 
-VERSION = "v5"
+VERSION = "v6"
 
 import os, re
 import requests
@@ -21,7 +21,8 @@ SHIRA   = "http://shira2"
 SPFE    = "http://prod-spfe:1000"
 FILE_ID = "2923739"
 
-def make_session():
+def make_shira_session():
+    """Session for shira2 — NTLM auth, no proxy. Do NOT pass proxies= per-request (breaks NTLM handshake)."""
     s = requests.Session()
     s.auth      = HttpNegotiateAuth()
     s.trust_env = False
@@ -29,26 +30,28 @@ def make_session():
     s.verify    = False
     return s
 
-def req(session, method, url, **kwargs):
-    """Always bypass proxy."""
-    kwargs.setdefault("proxies", {})
-    kwargs.setdefault("timeout", 15)
-    return getattr(session, method)(url, **kwargs)
+def make_spfe_session():
+    """Session for SPFE — no auth needed, no proxy."""
+    s = requests.Session()
+    s.trust_env = False
+    s.proxies   = {}
+    s.verify    = False
+    return s
 
 def main():
     print(f"=== Step 2 {VERSION} ===")
 
-    shira_session = make_session()   # for shira2 (needs NTLM)
-    spfe_session  = make_session()   # for SPFE (no auth required)
+    shira = make_shira_session()
+    spfe  = make_spfe_session()
 
-    # ── B: Load IframeFromMyComputerDocument.aspx — do shira2 FIRST ───────────
+    # ── B: Load IframeFromMyComputerDocument.aspx ─────────────────────────────
     print(f"\n[B] Loading IframeFromMyComputerDocument.aspx...")
     iframe_url = (
         f"{SHIRA}/classic/Forms/Documents/Scan/IframeFromMyComputerDocument.aspx"
         f"?FileID={FILE_ID}&EntityTypeID=6&EntityID={FILE_ID}&DocumentID=0"
     )
     try:
-        r = req(shira_session, "get", iframe_url)
+        r = shira.get(iframe_url, timeout=15)
         print(f"    Status  : {r.status_code}")
         soup = BeautifulSoup(r.text, "html.parser")
 
@@ -75,31 +78,30 @@ def main():
     except Exception as e:
         print(f"    ❌ {e}")
 
-    # ── C: WsShiraUtils WSDL ───────────────────────────────────────────────────
+    # ── C: WsShiraUtils WSDL ──────────────────────────────────────────────────
     print("\n[C] Checking WsShiraUtils WSDL...")
     try:
-        r = req(shira_session, "get", f"{SHIRA}/classic/WS/App/WsShiraUtils.asmx?WSDL")
+        r = shira.get(f"{SHIRA}/classic/WS/App/WsShiraUtils.asmx?WSDL", timeout=15)
         print(f"    Status : {r.status_code}")
         print(f"    Length : {len(r.text)} chars")
-        ops1 = re.findall(r'<operation name="([^"]+)"', r.text)
-        ops2 = re.findall(r'name="([^"]+)".*?operation', r.text)
-        ops  = ops1 or ops2
+        ops = re.findall(r'<operation name="([^"]+)"', r.text)
         print(f"    Operations found: {len(ops)}")
         if ops:
             for op in ops:
                 print(f"      - {op}")
         else:
-            print(f"    First 400 chars of response:\n    {r.text[:400]}")
+            print(f"    First 500 chars:\n    {r.text[:500]}")
     except Exception as e:
         print(f"    ❌ {e}")
 
-    # ── A: Try SPFE ImportDocument with dummy data ─────────────────────────────
+    # ── A: SPFE ImportDocument ────────────────────────────────────────────────
     print("\n[A] Testing SPFE ImportDocument endpoint...")
     try:
-        r = req(spfe_session, "post",
-                f"{SPFE}/ShiraDocsMngWS.asmx/ImportDocument",
-                data="{'fileUrl':'test', 'shiraDocId':'0', 'courtId':'5', 'isReadOnly':'false'}",
-                headers={"Content-Type": "application/json"})
+        r = spfe.post(
+            f"{SPFE}/ShiraDocsMngWS.asmx/ImportDocument",
+            data="{'fileUrl':'test', 'shiraDocId':'0', 'courtId':'5', 'isReadOnly':'false'}",
+            headers={"Content-Type": "application/json"},
+            timeout=15)
         print(f"    Status  : {r.status_code}")
         print(f"    Response: {r.text[:200]}")
         if r.status_code == 200:
