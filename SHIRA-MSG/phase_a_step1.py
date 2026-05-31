@@ -41,7 +41,11 @@ def main():
             f"?FileRequestID=0&FileID=2923739",
             timeout=10
         )
-        print(f"    Status : {r.status_code}")
+        print(f"    Status  : {r.status_code}")
+        print(f"    URL     : {r.url}")
+        print(f"    Content-Type: {r.headers.get('Content-Type','?')}")
+        print(f"    First 300 chars of response:")
+        print(f"    {r.text[:300]}")
         if r.status_code == 200:
             print("    ✅ Shira reachable and authenticated")
         elif r.status_code == 401:
