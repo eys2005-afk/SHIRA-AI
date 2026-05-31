@@ -9,10 +9,14 @@ Run:
     python phase_a_step2.py
 """
 
+import os
 import requests
 from requests_negotiate_sspi import HttpNegotiateAuth
 from bs4 import BeautifulSoup
 import re
+
+os.environ['NO_PROXY'] = 'shira2,prod-spfe,localhost,127.0.0.1'
+os.environ['no_proxy'] = 'shira2,prod-spfe,localhost,127.0.0.1'
 
 SHIRA   = "http://shira2"
 
@@ -24,7 +28,8 @@ def make_session():
     s = requests.Session()
     s.auth = HttpNegotiateAuth()
     s.headers.update({"Origin": SHIRA})
-    s.proxies = {"http": None, "https": None}
+    s.trust_env = False
+    s.proxies = {}
     s.verify = False
     return s
 
