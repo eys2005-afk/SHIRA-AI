@@ -259,11 +259,13 @@ mark { background: #fff176; border-radius: 2px; padding: 0 1px; }
       <button class="tab" onclick="switchTab('hearings')">📅 דיונים</button>
       <button class="tab" onclick="switchTab('search')">🔎 חיפוש בתיק</button>
       <button class="tab" onclick="switchTab('ai')">✨ סיכום AI</button>
+      <button class="tab" onclick="switchTab('msg')">📨 שלח הודעה</button>
     </div>
     <div id="tab-docs"></div>
     <div id="tab-hearings" style="display:none"></div>
     <div id="tab-search"   style="display:none"></div>
     <div id="tab-ai"       style="display:none"></div>
+    <div id="tab-msg"      style="display:none"></div>
   </div>
 
 </div>
@@ -630,14 +632,115 @@ async function preloadDocTexts() {
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach((t, i) =>
-    t.classList.toggle('active', ['docs','hearings','search','ai'][i] === tab));
-  ['docs','hearings','search','ai'].forEach(t => {
+    t.classList.toggle('active', ['docs','hearings','search','ai','msg'][i] === tab));
+  ['docs','hearings','search','ai','msg'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t === tab ? 'block' : 'none';
   });
   if (tab === 'docs')     renderDocs('');
   if (tab === 'hearings') loadHearings();
   if (tab === 'search')   renderSearchTab();
   if (tab === 'ai')       renderAITab();
+  if (tab === 'msg')      renderMsgTab();
+}
+
+// ── Message templates ─────────────────────────────────────────────────────────
+const MSG_TEMPLATES = [
+  { id: 'zimun',    name: 'זימון לדיון',           text: 'הנכם מוזמנים להתייצב לדיון בתיק הנ"ל אשר יתקיים במועד שייקבע ויודע לכם בנפרד.\nהנכם מתבקשים לאשר קבלת הודעה זו.' },
+  { id: 'dachuy',   name: 'דחיית דיון',            text: 'הדיון שנקבע בתיק הנ"ל נדחה למועד חדש אשר יודע לכם בנפרד.\nנא לאשר קבלת הודעה זו.' },
+  { id: 'mesamchim',name: 'בקשה להגשת מסמכים',    text: 'הנכם מתבקשים להגיש לבית הדין את המסמכים הרלוונטיים לתיק הנ"ל בתוך 14 יום מקבלת הודעה זו.' },
+  { id: 'hachlatah',name: 'הודעה על החלטה',        text: 'בית הדין מודיע כי ניתנה החלטה בתיק הנ"ל. ההחלטה מצורפת בזה.' },
+  { id: 'hofshi',   name: 'נוסח חופשי',            text: '' },
+];
+
+function renderMsgTab() {
+  const el = document.getElementById('tab-msg');
+  const stored = JSON.parse(localStorage.getItem('shira_msg_templates') || '[]');
+  const allTemplates = [...MSG_TEMPLATES, ...stored];
+
+  const btnStyle = 'padding:6px 12px;margin:3px;border:1px solid #b0bec5;border-radius:6px;cursor:pointer;font-size:13px;background:#f5f5f5';
+  const activeBtnStyle = btnStyle.replace('#f5f5f5','#1a3a5c').replace('border:1px solid #b0bec5','border:1px solid #1a3a5c') + ';color:#fff';
+
+  el.innerHTML = `
+    <div style="padding:16px 0">
+      <div style="margin-bottom:10px;font-weight:600;font-size:14px;color:#1a3a5c">בחר תבנית:</div>
+      <div id="msg-template-btns">
+        ${allTemplates.map((t,i) => `<button style="${i===0?activeBtnStyle:btnStyle}" onclick="selectMsgTemplate(${i})">${t.name}</button>`).join('')}
+        <button style="${btnStyle}" onclick="saveMsgTemplate()">＋ שמור תבנית חדשה</button>
+      </div>
+      <div style="margin-top:14px;margin-bottom:6px;font-weight:600;font-size:14px;color:#1a3a5c">תוכן ההודעה:</div>
+      <textarea id="msg-text" dir="rtl" style="width:100%;height:160px;padding:10px;font-size:14px;font-family:FrankRuehl,Arial;border:1px solid #b0bec5;border-radius:6px;resize:vertical;box-sizing:border-box">${allTemplates[0].text}</textarea>
+      <div style="margin-top:12px;text-align:center">
+        <button id="msg-send-btn" onclick="sendMessage()" style="padding:10px 32px;background:#1a3a5c;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;font-weight:600">📨 שלח הודעה</button>
+      </div>
+      <div id="msg-status" style="margin-top:10px;text-align:center;font-size:13px"></div>
+    </div>`;
+
+  window._msgTemplates = allTemplates;
+  window._msgSelectedIdx = 0;
+}
+
+function selectMsgTemplate(idx) {
+  window._msgSelectedIdx = idx;
+  const t = window._msgTemplates[idx];
+  document.getElementById('msg-text').value = t.text;
+  const btns = document.querySelectorAll('#msg-template-btns button');
+  const base = 'padding:6px 12px;margin:3px;border:1px solid #b0bec5;border-radius:6px;cursor:pointer;font-size:13px;background:#f5f5f5';
+  const active = 'padding:6px 12px;margin:3px;border:1px solid #1a3a5c;border-radius:6px;cursor:pointer;font-size:13px;background:#1a3a5c;color:#fff';
+  btns.forEach((b, i) => { if (i < window._msgTemplates.length) b.style.cssText = (i === idx ? active : base); });
+}
+
+function saveMsgTemplate() {
+  const name = prompt('שם התבנית החדשה:');
+  if (!name) return;
+  const text = document.getElementById('msg-text').value;
+  const stored = JSON.parse(localStorage.getItem('shira_msg_templates') || '[]');
+  stored.push({ id: 'custom_' + Date.now(), name, text });
+  localStorage.setItem('shira_msg_templates', JSON.stringify(stored));
+  renderMsgTab();
+}
+
+async function sendMessage() {
+  const text = document.getElementById('msg-text').value.trim();
+  if (!text) { alert('יש להזין תוכן להודעה'); return; }
+  if (!selectedCase) { alert('לא נבחר תיק'); return; }
+
+  const btn    = document.getElementById('msg-send-btn');
+  const status = document.getElementById('msg-status');
+  btn.disabled = true;
+  btn.textContent = '⏳ שולח...';
+  status.textContent = '';
+
+  try {
+    const fileId = selectedCase.fileId || selectedCase.fileMainId;
+    const r = await fetch(`${PROXY}/api/send-message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        caseData: {
+          fileId:      fileId,
+          fileNumber:  selectedCase.fullFileMainNumber || selectedCase.fileNumber || '',
+          sideA:       selectedCase.sideA || '',
+          sideB:       selectedCase.sideB || '',
+          subject:     selectedCase.subjectSubName || '',
+          courtName:   userCourtName || 'בית הדין הרבני',
+          courtId:     userCourtId || 5
+        }
+      })
+    });
+    const data = await r.json();
+    if (data.postalUrl) {
+      status.innerHTML = '<span style="color:green">✅ המסמך נוצר בהצלחה — פותח מסך דיוור...</span>';
+      window.open(data.postalUrl, '_blank');
+    } else {
+      status.innerHTML = `<span style="color:red">❌ שגיאה: ${data.error || 'לא ידוע'}</span>`;
+    }
+  } catch(e) {
+    status.innerHTML = `<span style="color:red">❌ שגיאת תקשורת: ${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '📨 שלח הודעה';
+  }
 }
 
 // ── Render docs ───────────────────────────────────────────────────────────────
@@ -2056,6 +2159,167 @@ def export_docx():
         as_attachment=True,
         download_name=filename
     )
+
+
+def create_message_docx(text, case_data, court_name):
+    """Generate a formal message docx with court header. Returns io.BytesIO."""
+    import io
+    import datetime
+    import docx as _docx
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    doc = _docx.Document()
+    section = doc.sections[0]
+    section.page_width    = 7560310
+    section.page_height   = 10692130
+    section.left_margin   = 900430
+    section.right_margin  = 1141095
+    section.top_margin    = 600000
+    section.bottom_margin = 810260
+
+    body_el = doc.element.body
+    sectPr = body_el.get_or_add_sectPr()
+    sectPr.append(OxmlElement('w:bidi'))
+
+    FONT = 'FrankRuehl'
+    SIZE = 14
+
+    def _rtl_para(p, center=False):
+        pf = p.paragraph_format
+        pf.space_before = Pt(4)
+        pf.space_after  = Pt(4)
+        pPr = p._p.get_or_add_pPr()
+        pPr.append(OxmlElement('w:bidi'))
+        jc = OxmlElement('w:jc')
+        jc.set(qn('w:val'), 'center' if center else 'both')
+        pPr.append(jc)
+
+    def _add(text_content, bold=False, center=False, size=None):
+        p = doc.add_paragraph()
+        _rtl_para(p, center)
+        run = p.add_run(text_content)
+        run.font.name  = FONT
+        run.font.size  = Pt(size or SIZE)
+        run.font.bold  = bold
+        rPr = run._r.get_or_add_rPr()
+        rPr.append(OxmlElement('w:rtl'))
+        lang = OxmlElement('w:lang')
+        lang.set(qn('w:bidi'), 'he-IL')
+        rPr.append(lang)
+
+    hebrew_date = datetime.datetime.now().strftime("%d/%m/%Y")
+    file_number = case_data.get("fileNumber", "")
+    side_a      = case_data.get("sideA", "")
+    side_b      = case_data.get("sideB", "")
+    subject     = case_data.get("subject", "")
+
+    _add("בבית הדין הרבני האזורי", bold=True, center=True)
+    _add(court_name, bold=True, center=True)
+    _add("")
+    if file_number:
+        _add(f"תיק מס' {file_number}", center=True)
+    if side_a or side_b:
+        _add(f"{side_a} — {side_b}", center=True)
+    if subject:
+        _add(f"נושא: {subject}", center=True)
+    _add(f"תאריך: {hebrew_date}", center=True)
+
+    # Divider
+    p_div = doc.add_paragraph()
+    pPr = p_div._p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bot = OxmlElement('w:bottom')
+    bot.set(qn('w:val'), 'single'); bot.set(qn('w:sz'), '6')
+    bot.set(qn('w:space'), '1');    bot.set(qn('w:color'), '1a3a5c')
+    pBdr.append(bot); pPr.append(pBdr)
+    p_div.paragraph_format.space_after = Pt(10)
+
+    for line in text.split('\n'):
+        _add(line.strip() if line.strip() else "")
+
+    # Footer divider
+    p_div2 = doc.add_paragraph()
+    pPr2 = p_div2._p.get_or_add_pPr()
+    pBdr2 = OxmlElement('w:pBdr')
+    top = OxmlElement('w:top')
+    top.set(qn('w:val'), 'single'); top.set(qn('w:sz'), '4')
+    top.set(qn('w:space'), '1');    top.set(qn('w:color'), 'aaaaaa')
+    pBdr2.append(top); pPr2.append(pBdr2)
+    p_div2.paragraph_format.space_before = Pt(12)
+
+    _add("בית הדין הרבני", bold=True, center=True, size=12)
+    _add(court_name, bold=True, center=True, size=12)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@app.route("/api/send-message", methods=["POST"])
+def send_message():
+    import re as _re, time as _time, getpass as _getpass
+    body       = request.json or {}
+    text       = body.get("text", "").strip()
+    case_data  = body.get("caseData", {})
+
+    if not text:
+        return jsonify({"error": "no text provided"}), 400
+
+    file_id    = case_data.get("fileId")
+    court_id   = case_data.get("courtId", 5)
+    court_name = case_data.get("courtName", "בית הדין הרבני")
+
+    if not file_id:
+        return jsonify({"error": "fileId required"}), 400
+
+    # 1. Generate docx
+    try:
+        buf = create_message_docx(text, case_data, court_name)
+    except Exception as e:
+        return jsonify({"error": f"docx generation failed: {e}"}), 500
+
+    # 2. Write to UNC Temp path
+    try:
+        username = _getpass.getuser()
+        unc_temp = f"\\\\Prod-nas1\\filer$\\Root\\Data\\Users\\{username}\\ScanDocuments\\Temp"
+        filename = f"shiramsg_{file_id}_{int(_time.time())}.docx"
+        unc_path = os.path.join(unc_temp, filename)
+        with open(unc_path, "wb") as f:
+            f.write(buf.read())
+        print(f"[send-message] wrote {filename} to UNC")
+    except Exception as e:
+        return jsonify({"error": f"UNC write failed: {e}"}), 500
+
+    # 3. Call SPFE ImportDocument — shiraDocId=fileId assigns new DocumentID
+    try:
+        unc_escaped = unc_path.replace("\\", "\\\\")
+        spfe_body   = (
+            f"{{'fileUrl':'{unc_escaped}', "
+            f"'shiraDocId':'{file_id}', "
+            f"'courtId':'{court_id}', "
+            f"'isReadOnly':'false'}}"
+        )
+        r = SESSION.post(
+            f"{SPFE}/ShiraDocsMngWS.asmx/ImportDocument",
+            data=spfe_body,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        m = _re.search(r'"d"\s*:\s*(-?\d+)', r.text)
+        doc_id = int(m.group(1)) if m else -1
+        print(f"[send-message] SPFE response: {r.text[:100]}  docId={doc_id}")
+    except Exception as e:
+        return jsonify({"error": f"SPFE call failed: {e}"}), 500
+
+    if doc_id <= 0:
+        return jsonify({"error": f"SPFE returned {doc_id} — document not created"}), 500
+
+    postal_url = f"{SHIRA}/classic/Forms/Postal/Postal.aspx?DocumentIDs={doc_id}&FileID={file_id}"
+    return jsonify({"postalUrl": postal_url, "docId": doc_id})
 
 
 @app.route("/api/usage")
