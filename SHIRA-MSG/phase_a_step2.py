@@ -7,7 +7,7 @@ Run:
     python phase_a_step2.py
 """
 
-VERSION = "v4"
+VERSION = "v5"
 
 import os, re
 import requests
@@ -38,32 +38,17 @@ def req(session, method, url, **kwargs):
 def main():
     print(f"=== Step 2 {VERSION} ===")
 
-    session = make_session()
+    shira_session = make_session()   # for shira2 (needs NTLM)
+    spfe_session  = make_session()   # for SPFE (no auth required)
 
-    # ── A: Try SPFE ImportDocument with dummy data ─────────────────────────────
-    print("\n[A] Testing SPFE ImportDocument endpoint...")
-    try:
-        r = req(session, "post",
-                f"{SPFE}/ShiraDocsMngWS.asmx/ImportDocument",
-                data="{'fileUrl':'test', 'shiraDocId':'0', 'courtId':'5', 'isReadOnly':'false'}",
-                headers={"Content-Type": "application/json"})
-        print(f"    Status  : {r.status_code}")
-        print(f"    Response: {r.text[:200]}")
-        if r.status_code == 200:
-            print("    ✅ SPFE ImportDocument endpoint reachable")
-        else:
-            print("    ⚠️  Check response above")
-    except Exception as e:
-        print(f"    ❌ {e}")
-
-    # ── B: Load IframeFromMyComputerDocument.aspx (the actual upload page) ─────
+    # ── B: Load IframeFromMyComputerDocument.aspx — do shira2 FIRST ───────────
     print(f"\n[B] Loading IframeFromMyComputerDocument.aspx...")
     iframe_url = (
         f"{SHIRA}/classic/Forms/Documents/Scan/IframeFromMyComputerDocument.aspx"
         f"?FileID={FILE_ID}&EntityTypeID=6&EntityID={FILE_ID}&DocumentID=0"
     )
     try:
-        r = req(session, "get", iframe_url)
+        r = req(shira_session, "get", iframe_url)
         print(f"    Status  : {r.status_code}")
         soup = BeautifulSoup(r.text, "html.parser")
 
@@ -80,7 +65,6 @@ def main():
         if form:
             print(f"    Form action : {form.get('action','(none)')}")
 
-        # Look for the DocumentID that gets generated
         doc_ids = re.findall(r'DocumentID[=\s:\'\"]+(\d+)', r.text)
         print(f"    DocumentIDs in page: {doc_ids}")
 
@@ -91,13 +75,12 @@ def main():
     except Exception as e:
         print(f"    ❌ {e}")
 
-    # ── C: Look for document creation WS call in WsShiraUtils ─────────────────
+    # ── C: WsShiraUtils WSDL ───────────────────────────────────────────────────
     print("\n[C] Checking WsShiraUtils WSDL...")
     try:
-        r = req(session, "get", f"{SHIRA}/classic/WS/App/WsShiraUtils.asmx?WSDL")
+        r = req(shira_session, "get", f"{SHIRA}/classic/WS/App/WsShiraUtils.asmx?WSDL")
         print(f"    Status : {r.status_code}")
         print(f"    Length : {len(r.text)} chars")
-        # Try both tag formats
         ops1 = re.findall(r'<operation name="([^"]+)"', r.text)
         ops2 = re.findall(r'name="([^"]+)".*?operation', r.text)
         ops  = ops1 or ops2
@@ -107,6 +90,22 @@ def main():
                 print(f"      - {op}")
         else:
             print(f"    First 400 chars of response:\n    {r.text[:400]}")
+    except Exception as e:
+        print(f"    ❌ {e}")
+
+    # ── A: Try SPFE ImportDocument with dummy data ─────────────────────────────
+    print("\n[A] Testing SPFE ImportDocument endpoint...")
+    try:
+        r = req(spfe_session, "post",
+                f"{SPFE}/ShiraDocsMngWS.asmx/ImportDocument",
+                data="{'fileUrl':'test', 'shiraDocId':'0', 'courtId':'5', 'isReadOnly':'false'}",
+                headers={"Content-Type": "application/json"})
+        print(f"    Status  : {r.status_code}")
+        print(f"    Response: {r.text[:200]}")
+        if r.status_code == 200:
+            print("    ✅ SPFE ImportDocument endpoint reachable")
+        else:
+            print("    ⚠️  Check response above")
     except Exception as e:
         print(f"    ❌ {e}")
 
