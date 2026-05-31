@@ -7,7 +7,7 @@ Run:
     python phase_a_step2.py
 """
 
-VERSION = "v3"
+VERSION = "v4"
 
 import os, re
 import requests
@@ -27,7 +27,6 @@ def make_session():
     s.trust_env = False
     s.proxies   = {}
     s.verify    = False
-    s.headers.update({"Origin": SHIRA})
     return s
 
 def req(session, method, url, **kwargs):
