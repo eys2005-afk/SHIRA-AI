@@ -6,9 +6,14 @@ Run:
     python phase_a_step1.py
 """
 
+import os
 import requests
 from requests_negotiate_sspi import HttpNegotiateAuth
 import re
+
+# Bypass proxy for internal servers — same as shira_proxy.py
+os.environ['NO_PROXY'] = 'shira2,prod-spfe,localhost,127.0.0.1'
+os.environ['no_proxy'] = 'shira2,prod-spfe,localhost,127.0.0.1'
 
 SHIRA = "http://shira2"
 SPFE  = "http://prod-spfe:1000"
@@ -16,7 +21,7 @@ SPFE  = "http://prod-spfe:1000"
 def make_session():
     s = requests.Session()
     s.auth = HttpNegotiateAuth()
-    s.proxies = {"http": None, "https": None}
+    s.trust_env = False   # ignore system proxy settings
     s.verify = False
     return s
 
