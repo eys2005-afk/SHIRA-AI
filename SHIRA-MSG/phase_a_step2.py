@@ -7,7 +7,7 @@ Run:
     python phase_a_step2.py
 """
 
-VERSION = "v7"
+VERSION = "v8"
 
 import os, re, io
 import requests
@@ -85,16 +85,29 @@ def main():
             r = session.post(iframe_url, data=post_data, files=files, timeout=30)
             print(f"    Status  : {r.status_code}")
 
-            # Look for document ID in response
+            # Look for document ID in response — try many patterns
             doc_ids = re.findall(r'[Dd]ocumnet[Ii][Dd][=\s:\'\"]+(\d+)', r.text)
             doc_ids += re.findall(r'[Dd]ocument[Ii][Dd][=\s:\'\"]+(\d+)', r.text)
             doc_ids = [d for d in doc_ids if d != "0"]
+
+            # Look for UNC path (contains the assigned doc ID as filename)
+            unc_paths = re.findall(r'\\\\[^\'\"<>\s]+', r.text)
+            # Look for UploadFileToDM redirect
+            upload_dm = re.findall(r'UploadFileToDM[^\'"<>\s]*', r.text)
+            # Look for any 7-8 digit numbers (doc IDs are large integers)
+            big_nums = re.findall(r'\b(\d{7,9})\b', r.text)
+
             if doc_ids:
                 print(f"    🎉 DocumentID found: {doc_ids[0]}")
                 print(f"    Postal URL: {SHIRA}/classic/Forms/Postal/Postal.aspx?DocumentIDs={doc_ids[0]}&FileID={FILE_ID}")
             else:
-                print(f"    ⚠️  No DocumentID in response")
-                print(f"    First 600 chars:\n    {r.text[:600]}")
+                print(f"    ⚠️  No DocumentID — checking for other clues...")
+                print(f"    UNC paths in response : {unc_paths[:3]}")
+                print(f"    UploadFileToDM refs   : {upload_dm[:3]}")
+                print(f"    Large numbers (7-9 digits): {list(dict.fromkeys(big_nums))[:10]}")
+                print(f"\n    --- Full response (first 3000 chars) ---")
+                print(r.text[:3000])
+                print(f"    --- End ---")
         except Exception as e:
             print(f"    ❌ {e}")
     else:
