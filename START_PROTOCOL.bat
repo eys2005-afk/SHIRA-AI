@@ -12,7 +12,7 @@ echo  [*] To stop: press Ctrl+C
 echo  ==========================================
 echo.
 
-python "C:\SHIRA AI\protocol_server.py"
+python "C:\Users\elchanans\Documents\AI\AI\SHIRA PROTOCOL\protocol_server.py"
 
 echo.
 echo [!] Server stopped.
