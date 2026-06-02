@@ -199,6 +199,7 @@ mark { background: #fff176; border-radius: 2px; padding: 0 1px; }
     <div class="sub">בתי הדין הרבניים</div>
   </div>
   <div style="margin-right:auto;display:flex;align-items:center;gap:10px;">
+    <a href="/protocol" style="font-size:12px;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.3);color:#fff;border-radius:20px;padding:4px 14px;text-decoration:none;">📝 פרוטוקול</a>
     <span class="user-chip" id="user-chip"></span>
   </div>
   <div class="status-dot" id="dot"></div>
@@ -2097,6 +2098,778 @@ def usage_stats():
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok", "shira": SHIRA})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROTOCOL MODULE — Audio recording + transcription + speaker attribution
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PROTOCOL_HTML = """<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>פרוטוקול דיון — שירה AI</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', Arial, sans-serif; direction: rtl; background: #f4f5f7; color: #1a1a2e; font-size: 14px; }
+header { background: #1a3a5c; color: #fff; padding: 12px 24px; display: flex; align-items: center; gap: 12px; }
+header h1 { font-size: 17px; font-weight: 500; }
+header .sub { font-size: 12px; opacity: 0.7; margin-top: 2px; }
+.back-btn { font-size: 12px; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); color: #fff; border-radius: 20px; padding: 4px 14px; cursor: pointer; text-decoration: none; display: inline-block; }
+.back-btn:hover { background: rgba(255,255,255,0.25); }
+.container { max-width: 900px; margin: 0 auto; padding: 20px 16px; }
+.card { background: #fff; border: 1px solid #e0e4ea; border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+.card-title { font-size: 13px; font-weight: 600; color: #555; margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
+.row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+label { font-size: 12px; color: #666; min-width: 90px; }
+input[type=text] { flex: 1; min-width: 160px; height: 36px; border: 1px solid #d0d5dd; border-radius: 7px; padding: 0 10px; font-size: 13px; direction: rtl; outline: none; transition: border 0.2s; }
+input[type=text]:focus { border-color: #1a3a5c; box-shadow: 0 0 0 3px rgba(26,58,92,0.1); }
+button { height: 38px; padding: 0 18px; border: 1px solid #d0d5dd; border-radius: 7px; background: #fff; color: #1a1a2e; font-size: 14px; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+button:hover { background: #f0f4f8; }
+button.primary { background: #1a3a5c; color: #fff; border-color: #1a3a5c; }
+button.primary:hover { background: #14304d; }
+button.danger { background: #c62828; color: #fff; border-color: #c62828; }
+button.danger:hover { background: #b71c1c; }
+button.success { background: #2e7d32; color: #fff; border-color: #2e7d32; }
+button.success:hover { background: #1b5e20; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.rec-btn { height: 54px; width: 54px; border-radius: 50%; font-size: 22px; padding: 0; display: flex; align-items: center; justify-content: center; border: 3px solid #c62828; background: #fff; color: #c62828; transition: all 0.2s; flex-shrink: 0; }
+.rec-btn.recording { background: #c62828; color: #fff; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(198,40,40,0.4); } 50% { box-shadow: 0 0 0 10px rgba(198,40,40,0); } }
+.rec-status { display: flex; align-items: center; gap: 14px; padding: 14px 16px; background: #f8f9fb; border-radius: 10px; }
+.rec-info { flex: 1; }
+.rec-state { font-size: 15px; font-weight: 600; color: #1a3a5c; }
+.rec-timer { font-size: 13px; color: #888; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.transcript-box { background: #f8fafc; border: 1px solid #e0e4ea; border-radius: 8px; min-height: 320px; max-height: 520px; overflow-y: auto; padding: 16px; font-size: 14px; line-height: 2; direction: rtl; }
+.transcript-box:empty::before { content: 'הפרוטוקול יופיע כאן תוך כדי ההקלטה...'; color: #aaa; font-style: italic; }
+.protocol-line { margin-bottom: 6px; display: flex; gap: 8px; align-items: flex-start; }
+.speaker-tag { font-weight: 700; color: #1a3a5c; min-width: 110px; flex-shrink: 0; font-size: 13px; padding-top: 1px; }
+.speaker-tag.judge   { color: #4a148c; }
+.speaker-tag.husband { color: #1565c0; }
+.speaker-tag.wife    { color: #880e4f; }
+.speaker-tag.atty-h  { color: #0277bd; }
+.speaker-tag.atty-w  { color: #ad1457; }
+.speaker-tag.other   { color: #2e7d32; }
+.speaker-tag.interruption { color: #e65100; font-style: italic; }
+.line-text { flex: 1; }
+.line-text[contenteditable=true]:focus { outline: 2px solid #1a3a5c; border-radius: 4px; padding: 2px 4px; }
+.processing-line { color: #888; font-style: italic; display: flex; align-items: center; gap: 8px; }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ddd; border-top-color: #1a3a5c; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.chunk-divider { border: none; border-top: 1px dashed #d0d5dd; margin: 10px 0; }
+.speaker-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.speaker-row { display: flex; align-items: center; gap: 8px; }
+.speaker-label { font-size: 12px; font-weight: 600; min-width: 110px; padding: 4px 8px; border-radius: 6px; text-align: center; }
+.sl-judge   { background: #ede7f6; color: #4a148c; }
+.sl-husband { background: #e3f2fd; color: #1565c0; }
+.sl-wife    { background: #fce4ec; color: #880e4f; }
+.sl-atty-h  { background: #e1f5fe; color: #0277bd; }
+.sl-atty-w  { background: #fce4ec; color: #ad1457; }
+.sl-other   { background: #e8f5e9; color: #2e7d32; }
+.badge { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+.badge-rec { background: #ffebee; color: #c62828; }
+.badge-ok  { background: #e8f5e9; color: #2e7d32; }
+.alert { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; }
+.alert-warn { background: #fff8e1; border: 1px solid #ffe082; color: #e65100; }
+.alert-info { background: #e3f2fd; border: 1px solid #90caf9; color: #0d47a1; }
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+#edit-mode-btn.active { background: #fff8e1; border-color: #ffc107; color: #e65100; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>📝 פרוטוקול דיון</h1>
+    <div class="sub">תמלול אוטומטי עם ייחוס דוברים</div>
+  </div>
+  <a href="/" class="back-btn" style="margin-right:auto;">← חזרה למערכת שירה</a>
+</header>
+
+<div class="container">
+
+  <!-- Step 1: Case info & speakers -->
+  <div class="card" id="setup-card">
+    <div class="card-title">⚙️ הגדרת הדיון</div>
+
+    <div class="row">
+      <label>מספר תיק:</label>
+      <input type="text" id="case-number" placeholder="לדוגמה: 1488524/1" />
+      <label>תאריך:</label>
+      <input type="text" id="case-date" id="case-date" />
+    </div>
+
+    <div class="card-title" style="margin-top:16px;">👥 שמות הדוברים</div>
+    <div class="speaker-grid">
+      <div class="speaker-row">
+        <span class="speaker-label sl-judge">אב"ד / דיין</span>
+        <input type="text" id="sp-judge" placeholder='שם הדיין / הרכב' />
+      </div>
+      <div class="speaker-row">
+        <span class="speaker-label sl-husband">הבעל</span>
+        <input type="text" id="sp-husband" placeholder="שם הבעל" />
+      </div>
+      <div class="speaker-row">
+        <span class="speaker-label sl-wife">האשה</span>
+        <input type="text" id="sp-wife" placeholder="שם האשה" />
+      </div>
+      <div class="speaker-row">
+        <span class="speaker-label sl-atty-h">ב"כ הבעל</span>
+        <input type="text" id="sp-atty-h" placeholder='עו"ד מטעם הבעל' />
+      </div>
+      <div class="speaker-row">
+        <span class="speaker-label sl-atty-w">ב"כ האשה</span>
+        <input type="text" id="sp-atty-w" placeholder='עו"ד מטעם האשה' />
+      </div>
+      <div class="speaker-row">
+        <span class="speaker-label sl-other">אחר</span>
+        <input type="text" id="sp-other" placeholder="עד / מומחה / אחר" />
+      </div>
+    </div>
+
+    <div style="margin-top:16px;display:flex;gap:10px;align-items:center;">
+      <button class="primary" onclick="startSession()">▶ התחל הקלטה</button>
+      <span style="font-size:12px;color:#888;">הדפדפן יבקש אישור גישה למיקרופון</span>
+    </div>
+  </div>
+
+  <!-- Step 2: Recording panel -->
+  <div class="card" id="recording-card" style="display:none;">
+    <div class="card-title">🎙 הקלטה פעילה</div>
+
+    <div class="rec-status">
+      <button class="rec-btn" id="rec-btn" onclick="toggleRecording()" title="התחל / עצור הקלטה">⏺</button>
+      <div class="rec-info">
+        <div class="rec-state" id="rec-state">מוכן להקלטה</div>
+        <div class="rec-timer" id="rec-timer">00:00:00</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <button onclick="sendCurrentChunk()" id="send-chunk-btn" style="font-size:12px;height:32px;">⬆ שלח קטע עכשיו</button>
+        <span id="chunk-status" style="font-size:11px;color:#888;text-align:center;"></span>
+      </div>
+    </div>
+
+    <div id="rec-alert" class="alert alert-info" style="margin-top:12px;display:none;"></div>
+
+    <div style="margin-top:16px;">
+      <div class="toolbar">
+        <strong style="font-size:13px;color:#1a3a5c;">📄 פרוטוקול</strong>
+        <button id="edit-mode-btn" onclick="toggleEditMode()" style="font-size:12px;height:32px;">✏️ מצב עריכה</button>
+        <button onclick="clearTranscript()" style="font-size:12px;height:32px;color:#888;">🗑 נקה</button>
+        <div style="margin-right:auto;display:flex;gap:6px;">
+          <button class="success" onclick="exportProtocol()" style="font-size:12px;height:32px;">📄 ייצא Word</button>
+        </div>
+      </div>
+      <div class="transcript-box" id="transcript-box"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const PROXY = "http://localhost:5050";
+
+let mediaRecorder = null;
+let audioChunks   = [];
+let recordingInterval = null;
+let timerInterval = null;
+let elapsedSec    = 0;
+let isRecording   = false;
+let editMode      = false;
+let autoSendInterval = null;
+const AUTO_SEND_MS = 45000; // send every 45 seconds
+
+// Set today's date
+document.getElementById('case-date').value = new Date().toLocaleDateString('he-IL', {
+  day:'2-digit', month:'2-digit', year:'numeric'
+}).replace(/\\./g, '/');
+
+function getSpeakers() {
+  return {
+    judge:  document.getElementById('sp-judge').value.trim()  || 'ביה"ד',
+    husband:document.getElementById('sp-husband').value.trim() || 'הבעל',
+    wife:   document.getElementById('sp-wife').value.trim()   || 'האשה',
+    attyH:  document.getElementById('sp-atty-h').value.trim() || 'ב"כ הבעל',
+    attyW:  document.getElementById('sp-atty-w').value.trim() || 'ב"כ האשה',
+    other:  document.getElementById('sp-other').value.trim()  || 'אחר',
+  };
+}
+
+async function startSession() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop()); // just test permission
+  } catch(e) {
+    alert('לא ניתן לגשת למיקרופון: ' + e.message);
+    return;
+  }
+  document.getElementById('setup-card').style.display = 'none';
+  document.getElementById('recording-card').style.display = 'block';
+}
+
+async function toggleRecording() {
+  if (!isRecording) {
+    await startRecording();
+  } else {
+    stopRecording();
+  }
+}
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg';
+
+    mediaRecorder = new MediaRecorder(stream, { mimeType });
+    audioChunks = [];
+
+    mediaRecorder.ondataavailable = e => {
+      if (e.data && e.data.size > 0) audioChunks.push(e.data);
+    };
+
+    mediaRecorder.start(1000); // collect 1-second blobs
+    isRecording = true;
+
+    document.getElementById('rec-btn').classList.add('recording');
+    document.getElementById('rec-btn').textContent = '⏹';
+    document.getElementById('rec-state').textContent = 'מקליט...';
+    document.getElementById('send-chunk-btn').disabled = false;
+    setAlert('מקליט. הפרוטוקול יעודכן אוטומטית כל 45 שניות.', 'info');
+
+    // Auto-send every AUTO_SEND_MS
+    autoSendInterval = setInterval(() => sendCurrentChunk(), AUTO_SEND_MS);
+
+    // Timer
+    elapsedSec = 0;
+    timerInterval = setInterval(() => {
+      elapsedSec++;
+      document.getElementById('rec-timer').textContent = formatTime(elapsedSec);
+    }, 1000);
+
+  } catch(e) {
+    alert('שגיאה בפתיחת מיקרופון: ' + e.message);
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+    mediaRecorder.stream.getTracks().forEach(t => t.stop());
+  }
+  isRecording = false;
+  clearInterval(autoSendInterval);
+  clearInterval(timerInterval);
+
+  document.getElementById('rec-btn').classList.remove('recording');
+  document.getElementById('rec-btn').textContent = '⏺';
+  document.getElementById('rec-state').textContent = 'הקלטה הופסקה';
+  document.getElementById('send-chunk-btn').disabled = true;
+
+  // Send remaining audio
+  if (audioChunks.length > 0) {
+    setTimeout(() => sendCurrentChunk(true), 500);
+  }
+}
+
+async function sendCurrentChunk(isFinal = false) {
+  if (audioChunks.length === 0) {
+    setChunkStatus('אין אודיו לשליחה');
+    return;
+  }
+
+  const chunksToSend = [...audioChunks];
+  audioChunks = []; // reset for next batch
+
+  const blob = new Blob(chunksToSend, { type: mediaRecorder?.mimeType || 'audio/webm' });
+  if (blob.size < 3000) {
+    setChunkStatus('קטע קצר מדי, ממתין...');
+    audioChunks = chunksToSend; // put back
+    return;
+  }
+
+  const speakers = getSpeakers();
+  const speakersList = Object.values(speakers).filter(Boolean).join(', ');
+
+  setChunkStatus('מעבד...');
+  appendProcessingLine();
+
+  const formData = new FormData();
+  formData.append('audio', blob, 'chunk.webm');
+  formData.append('speakers', JSON.stringify(speakers));
+  formData.append('speakers_list', speakersList);
+  formData.append('is_final', isFinal ? '1' : '0');
+  formData.append('case_number', document.getElementById('case-number').value.trim());
+
+  try {
+    const resp = await fetch(`${PROXY}/api/protocol/transcribe`, {
+      method: 'POST',
+      body: formData
+    });
+    const data = await resp.json();
+    removeProcessingLine();
+    if (data.error) {
+      setChunkStatus('שגיאה: ' + data.error);
+      appendErrorLine(data.error);
+    } else if (data.lines && data.lines.length) {
+      data.lines.forEach(line => appendProtocolLine(line));
+      appendDivider();
+      setChunkStatus(`✓ ${data.lines.length} שורות נוספו`);
+    } else {
+      setChunkStatus('לא זוהה דיבור בקטע זה');
+    }
+  } catch(e) {
+    removeProcessingLine();
+    setChunkStatus('שגיאה בשליחה');
+    appendErrorLine(e.message);
+  }
+}
+
+function appendProtocolLine(line) {
+  const box = document.getElementById('transcript-box');
+  const div = document.createElement('div');
+  div.className = 'protocol-line';
+  div.dataset.speaker = line.speaker_key || 'other';
+
+  const tag = document.createElement('span');
+  tag.className = 'speaker-tag ' + (line.speaker_class || 'other');
+  tag.textContent = line.speaker + ':';
+
+  const text = document.createElement('span');
+  text.className = 'line-text';
+  text.textContent = line.text;
+  if (editMode) text.contentEditable = 'true';
+
+  div.appendChild(tag);
+  div.appendChild(text);
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendDivider() {
+  const box = document.getElementById('transcript-box');
+  const hr = document.createElement('hr');
+  hr.className = 'chunk-divider';
+  box.appendChild(hr);
+}
+
+function appendProcessingLine() {
+  const box = document.getElementById('transcript-box');
+  const div = document.createElement('div');
+  div.className = 'processing-line';
+  div.id = 'processing-indicator';
+  div.innerHTML = '<span class="spinner"></span> מתמלל...';
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function removeProcessingLine() {
+  document.getElementById('processing-indicator')?.remove();
+}
+
+function appendErrorLine(msg) {
+  const box = document.getElementById('transcript-box');
+  const div = document.createElement('div');
+  div.style.cssText = 'color:#c62828;font-size:12px;padding:4px 0;font-style:italic;';
+  div.textContent = '⚠ ' + msg;
+  box.appendChild(div);
+}
+
+function toggleEditMode() {
+  editMode = !editMode;
+  const btn = document.getElementById('edit-mode-btn');
+  btn.classList.toggle('active', editMode);
+  btn.textContent = editMode ? '✏️ עריכה פעילה' : '✏️ מצב עריכה';
+  document.querySelectorAll('.line-text').forEach(el => {
+    el.contentEditable = editMode ? 'true' : 'false';
+  });
+}
+
+function clearTranscript() {
+  if (!confirm('למחוק את כל הפרוטוקול?')) return;
+  document.getElementById('transcript-box').innerHTML = '';
+}
+
+function setAlert(msg, type='info') {
+  const el = document.getElementById('rec-alert');
+  el.className = 'alert alert-' + type;
+  el.textContent = msg;
+  el.style.display = 'block';
+  if (type === 'info') setTimeout(() => { el.style.display = 'none'; }, 8000);
+}
+
+function setChunkStatus(msg) {
+  document.getElementById('chunk-status').textContent = msg;
+}
+
+function formatTime(s) {
+  const h = String(Math.floor(s/3600)).padStart(2,'0');
+  const m = String(Math.floor((s%3600)/60)).padStart(2,'0');
+  const sec = String(s%60).padStart(2,'0');
+  return `${h}:${m}:${sec}`;
+}
+
+// ── Export to Word ─────────────────────────────────────────────────────────
+async function exportProtocol() {
+  const lines = [];
+  document.querySelectorAll('.protocol-line').forEach(div => {
+    const speaker = div.querySelector('.speaker-tag')?.textContent?.replace(':','').trim() || '';
+    const text    = div.querySelector('.line-text')?.textContent?.trim() || '';
+    if (text) lines.push({ speaker, text });
+  });
+
+  if (!lines.length) {
+    alert('הפרוטוקול ריק — אין מה לייצא.');
+    return;
+  }
+
+  try {
+    const resp = await fetch(`${PROXY}/api/protocol/export-docx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lines,
+        case_number: document.getElementById('case-number').value.trim(),
+        case_date:   document.getElementById('case-date').value.trim(),
+        speakers:    getSpeakers()
+      })
+    });
+    if (!resp.ok) { alert('שגיאה בייצוא'); return; }
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    const cd   = resp.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename\\*?=(?:UTF-8'')?([^;]+)/i);
+    a.download = match ? decodeURIComponent(match[1]) : 'פרוטוקול.docx';
+    a.href = url;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch(e) {
+    alert('שגיאה: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>
+"""
+
+
+@app.route("/protocol")
+def protocol_page():
+    return Response(_PROTOCOL_HTML, mimetype="text/html; charset=utf-8")
+
+
+@app.route("/api/protocol/transcribe", methods=["POST"])
+def protocol_transcribe():
+    """
+    Receives an audio blob from the browser MediaRecorder,
+    sends it to Gemini with speaker context, returns structured protocol lines.
+    """
+    import base64
+
+    audio_file   = request.files.get("audio")
+    speakers_raw = request.form.get("speakers", "{}")
+    is_final     = request.form.get("is_final", "0") == "1"
+
+    if not audio_file:
+        return jsonify({"error": "no audio file"}), 400
+
+    try:
+        speakers = json.loads(speakers_raw)
+    except Exception:
+        speakers = {}
+
+    judge  = speakers.get("judge",   'ביה"ד')
+    husband= speakers.get("husband", "הבעל")
+    wife   = speakers.get("wife",    "האשה")
+    atty_h = speakers.get("attyH",   'ב"כ הבעל')
+    atty_w = speakers.get("attyW",   'ב"כ האשה')
+    other  = speakers.get("other",   "")
+
+    speakers_desc = f"""
+- {judge} (ביה"ד / דיין / אב"ד)
+- {husband} (הבעל)
+- {wife} (האשה)
+- {atty_h} (ב"כ הבעל)
+- {atty_w} (ב"כ האשה)
+""".strip()
+    if other:
+        speakers_desc += f"\n- {other} (אחר)"
+
+    speaker_map = {
+        "judge":   judge,
+        "husband": husband,
+        "wife":    wife,
+        "atty_h":  atty_h,
+        "atty_w":  atty_w,
+    }
+    if other:
+        speaker_map["other"] = other
+
+    audio_bytes = audio_file.read()
+    audio_b64   = base64.b64encode(audio_bytes).decode()
+
+    mime_type = audio_file.mimetype or "audio/webm"
+    if not mime_type or mime_type == "application/octet-stream":
+        mime_type = "audio/webm"
+
+    prompt = f"""אתה כותב פרוטוקול לבית דין רבני.
+תמלל את הדיון הקולי הזה ויחס כל דיבור לדובר המתאים.
+
+הדוברים בדיון:
+{speakers_desc}
+
+כללים:
+1. עבור כל משפט שנאמר, כתוב שורה בפורמט: SPEAKER_KEY|שם הדובר|הטקסט שנאמר
+2. SPEAKER_KEY הוא אחד מ: judge / husband / wife / atty_h / atty_w / other
+3. אם מישהו מתפרץ או מפריע, כתוב: interruption|התפרצות|[מה נאמר]
+4. תמלל בעברית בלבד
+5. שמור על הטקסט המדויק ככל האפשר — אל תסכם, אל תשמיט
+6. אם אין דיבור ברור — החזר שורה ריקה בלבד
+7. אל תוסיף הסברים — רק שורות בפורמט המבוקש
+
+דוגמה לפורמט:
+judge|{judge}|הדיון פתוח. מר ישראל, בבקשה.
+husband|{husband}|אני טוען שהסכם הממון אינו תקף.
+atty_w|{atty_w}|אדוני, אני מתנגדת לטענה זו.
+interruption|התפרצות|[הבעל מדבר מבלי שיקבל רשות]
+"""
+
+    try:
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+        )
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"inline_data": {"mime_type": mime_type, "data": audio_b64}},
+                    {"text": prompt}
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 4096
+            }
+        }
+
+        resp = requests.post(
+            url, json=payload,
+            proxies={"https": None, "http": None},
+            verify=False, timeout=120
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        raw_text = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        ).strip()
+
+        print(f"[protocol] Gemini raw:\n{raw_text[:500]}")
+
+        # Parse lines
+        lines = []
+        speaker_class_map = {
+            "judge":        "judge",
+            "husband":      "husband",
+            "wife":         "wife",
+            "atty_h":       "atty-h",
+            "atty_w":       "atty-w",
+            "other":        "other",
+            "interruption": "interruption",
+        }
+
+        for raw_line in raw_text.splitlines():
+            raw_line = raw_line.strip()
+            if not raw_line or "|" not in raw_line:
+                continue
+            parts_line = raw_line.split("|", 2)
+            if len(parts_line) < 3:
+                continue
+            speaker_key, speaker_name, text = parts_line[0].strip(), parts_line[1].strip(), parts_line[2].strip()
+            if not text:
+                continue
+            lines.append({
+                "speaker_key":   speaker_key,
+                "speaker":       speaker_name or speaker_map.get(speaker_key, speaker_key),
+                "speaker_class": speaker_class_map.get(speaker_key, "other"),
+                "text":          text
+            })
+
+        return jsonify({"lines": lines, "raw": raw_text[:1000]})
+
+    except Exception as e:
+        print(f"[protocol] error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/protocol/export-docx", methods=["POST"])
+def protocol_export_docx():
+    """Generate a proper protocol DOCX in FrankRuehl format."""
+    import io
+    import datetime
+    import docx as _docx
+    from docx.shared import Pt, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    body        = request.json
+    lines       = body.get("lines", [])
+    case_number = body.get("case_number", "")
+    case_date   = body.get("case_date", "")
+    speakers    = body.get("speakers", {})
+
+    doc = _docx.Document()
+    section = doc.sections[0]
+    section.page_width  = 7560310
+    section.page_height = 10692130
+    section.left_margin   = 900430
+    section.right_margin  = 1141095
+    section.top_margin    = 500000
+    section.bottom_margin = 810260
+
+    body_el = doc.element.body
+    sectPr  = body_el.get_or_add_sectPr()
+    bidi    = OxmlElement('w:bidi')
+    sectPr.append(bidi)
+
+    FONT = 'FrankRuehl'
+
+    def rtl_para(p, center=False):
+        pf = p.paragraph_format
+        pPr = p._p.get_or_add_pPr()
+        b = OxmlElement('w:bidi'); pPr.append(b)
+        jc = OxmlElement('w:jc')
+        jc.set(qn('w:val'), 'center' if center else 'both')
+        pPr.append(jc)
+        pf.alignment = WD_ALIGN_PARAGRAPH.CENTER if center else WD_ALIGN_PARAGRAPH.JUSTIFY
+        return p
+
+    def add_para(text, bold=False, center=False, size=14, color=None,
+                 space_before=4, space_after=4):
+        p = doc.add_paragraph()
+        rtl_para(p, center)
+        p.paragraph_format.space_before = Pt(space_before)
+        p.paragraph_format.space_after  = Pt(space_after)
+        r = p.add_run(text)
+        r.font.name = FONT
+        r.font.size = Pt(size)
+        r.font.bold = bold
+        if color:
+            r.font.color.rgb = RGBColor(*color)
+        rPr = r._r.get_or_add_rPr()
+        rtl = OxmlElement('w:rtl'); rPr.append(rtl)
+        lang = OxmlElement('w:lang'); lang.set(qn('w:bidi'), 'he-IL'); rPr.append(lang)
+        return p
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    add_para("בית הדין הרבני האזורי", bold=True, center=True, size=16, space_before=6, space_after=2)
+    add_para("פרוטוקול דיון", bold=True, center=True, size=15, space_after=4)
+
+    if case_number:
+        add_para(f"תיק מס' {case_number}", center=True, size=13, space_after=2)
+    if case_date:
+        add_para(f"תאריך: {case_date}", center=True, size=13, space_after=6)
+
+    # Parties block
+    if speakers.get("husband") or speakers.get("wife"):
+        add_para("הצדדים:", bold=True, size=13, space_before=6, space_after=2)
+        if speakers.get("husband"):
+            label = "הבעל"
+            atty  = f" (ב\"כ: {speakers['attyH']})" if speakers.get("attyH") else ""
+            add_para(f"{label}: {speakers['husband']}{atty}", size=12, space_after=1)
+        if speakers.get("wife"):
+            label = "האשה"
+            atty  = f" (ב\"כ: {speakers['attyW']})" if speakers.get("attyW") else ""
+            add_para(f"{label}: {speakers['wife']}{atty}", size=12, space_after=4)
+
+    # Divider
+    p_div = doc.add_paragraph()
+    pPr   = p_div._p.get_or_add_pPr()
+    pBdr  = OxmlElement('w:pBdr')
+    bot   = OxmlElement('w:bottom')
+    bot.set(qn('w:val'), 'single'); bot.set(qn('w:sz'), '6')
+    bot.set(qn('w:space'), '1');    bot.set(qn('w:color'), '1a3a5c')
+    pBdr.append(bot); pPr.append(pBdr)
+    p_div.paragraph_format.space_after = Pt(10)
+
+    # ── Protocol lines ────────────────────────────────────────────────────────
+    speaker_colors = {
+        "judge":        (74, 20, 140),
+        "husband":      (21, 101, 192),
+        "wife":         (136, 14, 79),
+        "atty_h":       (2, 119, 189),
+        "atty_w":       (173, 20, 87),
+        "other":        (46, 125, 50),
+        "interruption": (230, 81, 0),
+    }
+
+    for line in lines:
+        speaker     = line.get("speaker", "")
+        text        = line.get("text", "")
+        speaker_key = line.get("speaker_key", "other")
+        if not text:
+            continue
+
+        p = doc.add_paragraph()
+        rtl_para(p)
+        p.paragraph_format.space_before = Pt(3)
+        p.paragraph_format.space_after  = Pt(3)
+
+        # Speaker run (bold, colored)
+        color = speaker_colors.get(speaker_key, (30, 30, 30))
+        r1 = p.add_run(f"{speaker}: ")
+        r1.font.name = FONT
+        r1.font.size = Pt(13)
+        r1.font.bold = True
+        r1.font.color.rgb = RGBColor(*color)
+        rPr1 = r1._r.get_or_add_rPr()
+        OxmlElement('w:rtl') ; rPr1.append(OxmlElement('w:rtl'))
+        lang1 = OxmlElement('w:lang'); lang1.set(qn('w:bidi'), 'he-IL'); rPr1.append(lang1)
+
+        # Text run
+        r2 = p.add_run(text)
+        r2.font.name = FONT
+        r2.font.size = Pt(13)
+        if speaker_key == "interruption":
+            r2.font.italic = True
+            r2.font.color.rgb = RGBColor(*color)
+        rPr2 = r2._r.get_or_add_rPr()
+        rPr2.append(OxmlElement('w:rtl'))
+        lang2 = OxmlElement('w:lang'); lang2.set(qn('w:bidi'), 'he-IL'); rPr2.append(lang2)
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    p_foot = doc.add_paragraph()
+    pPr_f  = p_foot._p.get_or_add_pPr()
+    pBdr_f = OxmlElement('w:pBdr')
+    top    = OxmlElement('w:top')
+    top.set(qn('w:val'), 'single'); top.set(qn('w:sz'), '4')
+    top.set(qn('w:space'), '1');    top.set(qn('w:color'), 'aaaaaa')
+    pBdr_f.append(top); pPr_f.append(pBdr_f)
+    p_foot.paragraph_format.space_before = Pt(14)
+
+    now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+    add_para(f"הופק על ידי מערכת שירה AI  |  {now}", size=9, center=True, color=(150, 150, 150))
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+
+    filename = f"פרוטוקול_{case_number or 'דיון'}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.docx"
+
+    from flask import send_file
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name=filename
+    )
 
 
 if __name__ == "__main__":
