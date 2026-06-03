@@ -239,6 +239,7 @@ def ai_proxy():
     msg  = anonymize(msg[:200000])
     url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
     print(f"[ai] sending {len(msg)} chars to Gemini")
+    print(f"[ai] === FIRST 500 CHARS SENT TO GEMINI ===\n{msg[:500]}\n[ai] ===================================")
 
     @stream_with_context
     def gen():
