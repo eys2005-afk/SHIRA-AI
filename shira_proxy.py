@@ -233,10 +233,20 @@ def hearings(file_id):
 
 @app.route("/api/ai", methods=["POST"])
 def ai_proxy():
-    b    = request.json or {}
-    msg  = b.get("messages", [{}])[0].get("content", "")
-    sys_ = b.get("system", "אתה עוזר משפטי לבית הדין הרבני. ענה בעברית בלבד. ללא markdown.")
-    msg  = anonymize(msg[:200000])
+    b       = request.json or {}
+    msg     = b.get("messages", [{}])[0].get("content", "")
+    sys_    = b.get("system", "אתה עוזר משפטי לבית הדין הרבני. ענה בעברית בלבד. ללא markdown.")
+    side_a  = (b.get("sideA") or "").strip()
+    side_b  = (b.get("sideB") or "").strip()
+    case_no = (b.get("caseNumber") or "").strip()
+    msg     = msg[:200000]
+    if side_a:
+        msg = msg.replace(side_a, "צד א")
+    if side_b:
+        msg = msg.replace(side_b, "צד ב")
+    if case_no:
+        msg = msg.replace(case_no, "[תיק]")
+    msg = anonymize(msg)
     url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
     print(f"[ai] sending {len(msg)} chars to Gemini")
     print(f"[ai] === FIRST 500 CHARS SENT TO GEMINI ===\n{msg[:500]}\n[ai] ===================================")
@@ -1249,7 +1259,13 @@ async function streamAI(system, userMessage, targetEl) {
   const resp = await fetch(PROXY + '/api/ai', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({system, messages:[{role:'user',content:userMessage}]})
+    body:JSON.stringify({
+      system,
+      messages:[{role:'user',content:userMessage}],
+      sideA: selectedCase?.sideA || '',
+      sideB: selectedCase?.sideB || '',
+      caseNumber: selectedCase?.fullFileMainNumber || selectedCase?.fileNumber || ''
+    })
   });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
   const reader  = resp.body.getReader();
