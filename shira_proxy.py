@@ -240,10 +240,24 @@ def ai_proxy():
     side_b  = (b.get("sideB") or "").strip()
     case_no = (b.get("caseNumber") or "").strip()
     msg     = msg[:200000]
-    if side_a:
-        msg = msg.replace(side_a, "צד א")
-    if side_b:
-        msg = msg.replace(side_b, "צד ב")
+
+    def extract_name(side):
+        # sideA/sideB format: "תובע/ת, שם משפחה שם פרטי, מספר ת.ז"
+        # extract just the name part (middle token between commas)
+        parts = [p.strip() for p in side.split(",") if p.strip()]
+        names = [p for p in parts if not re.match(r'^\d+$', p) and '/' not in p]
+        return names
+
+    def replace_names(text, names, label):
+        for name in names:
+            if len(name) >= 2:
+                text = text.replace(name, label)
+                # also replace reversed version (for visual-order PDFs)
+                text = text.replace(name[::-1], label)
+        return text
+
+    msg = replace_names(msg, extract_name(side_a), "צד א")
+    msg = replace_names(msg, extract_name(side_b), "צד ב")
     if case_no:
         msg = msg.replace(case_no, "[תיק]")
     msg = anonymize(msg)
