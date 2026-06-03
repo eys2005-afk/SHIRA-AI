@@ -190,7 +190,19 @@ def doc_text(doc_id):
         ext  = furl.rsplit(".", 1)[-1].lower()
         text = ""
         if ext == "pdf":
-            text = pdf_extract_text(buf) or ""
+            raw = pdf_extract_text(buf) or ""
+            # fix visual-order RTL PDFs: reverse each line
+            lines = raw.splitlines()
+            fixed = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped and any('֐' <= c <= '׿' for c in stripped):
+                    # line contains Hebrew — check if it looks reversed
+                    rev = stripped[::-1]
+                    fixed.append(rev)
+                else:
+                    fixed.append(line)
+            text = "\n".join(fixed)
         elif ext in ("docx", "doc"):
             text = "\n".join(p.text for p in docx_lib.Document(buf).paragraphs)
         else:
