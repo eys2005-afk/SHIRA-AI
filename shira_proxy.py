@@ -248,8 +248,11 @@ def ai_proxy():
         msg = msg.replace(case_no, "[תיק]")
     msg = anonymize(msg)
     url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
-    print(f"[ai] sending {len(msg)} chars to Gemini")
-    print(f"[ai] === FIRST 500 CHARS SENT TO GEMINI ===\n{msg[:500]}\n[ai] ===================================")
+    print(f"[ai] sending {len(msg)} chars to Gemini | sideA={side_a!r} sideB={side_b!r} case={case_no!r}")
+    try:
+        with open("C:/SHIRA AI/gemini_preview.txt", "w", encoding="utf-8") as _f:
+            _f.write(f"sideA: {side_a}\nsideB: {side_b}\ncaseNumber: {case_no}\n\n--- FIRST 500 CHARS ---\n{msg[:500]}\n")
+    except Exception: pass
 
     @stream_with_context
     def gen():
