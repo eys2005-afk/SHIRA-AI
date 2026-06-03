@@ -270,8 +270,26 @@ def ai_proxy():
     url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
     print(f"[ai] sending {len(msg)} chars to Gemini | sideA={side_a!r} sideB={side_b!r} case={case_no!r}")
     try:
-        with open("C:/SHIRA AI/gemini_preview.txt", "w", encoding="utf-8") as _f:
-            _f.write(f"sideA: {side_a}\nsideB: {side_b}\ncaseNumber: {case_no}\n\n--- FIRST 500 CHARS ---\n{msg[:500]}\n")
+        preview_html = f"""<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head><meta charset="utf-8"><title>Gemini Preview</title>
+<style>body{{font-family:Arial;font-size:14px;padding:20px;direction:rtl}}
+.label{{color:#888;font-size:12px;margin-bottom:4px}}
+.val{{background:#f5f5f5;padding:8px;border-radius:4px;margin-bottom:12px;white-space:pre-wrap}}
+.ok{{color:green;font-weight:bold}} .warn{{color:red;font-weight:bold}}</style></head>
+<body>
+<h2>מה נשלח ל-Gemini</h2>
+<div class="label">צד א (מקורי):</div><div class="val">{side_a}</div>
+<div class="label">צד ב (מקורי):</div><div class="val">{side_b}</div>
+<div class="label">מספר תיק (מקורי):</div><div class="val">{case_no}</div>
+<hr>
+<div class="label">500 התווים הראשונים שנשלחים ל-Gemini (אחרי סינון):</div>
+<div class="val">{msg[:500].replace('<','&lt;').replace('>','&gt;')}</div>
+<hr>
+<p>{"<span class='ok'>✓ השמות הוחלפו בהצלחה</span>" if side_a.split(",")[1].strip() not in msg[:5000] else "<span class='warn'>⚠ ייתכן שעדיין יש שמות בטקסט</span>"}</p>
+</body></html>"""
+        with open("C:/SHIRA AI/gemini_preview.html", "w", encoding="utf-8") as _f:
+            _f.write(preview_html)
     except Exception: pass
 
     @stream_with_context
