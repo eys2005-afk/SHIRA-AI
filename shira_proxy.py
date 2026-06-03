@@ -12,7 +12,7 @@ if getattr(sys, 'frozen', False):
     import warnings
     warnings.filterwarnings("ignore")
 
-VERSION = "2.3"
+VERSION = "2.4"
 
 os.environ['NO_PROXY'] = 'shira2,prod-spfe,10.67.60.51,localhost,127.0.0.1'
 urllib3.disable_warnings()
@@ -368,7 +368,9 @@ def do_update():
             bat = os.path.join(BASE_DIR, "_updater.bat")
             open(bat, "w", encoding="ascii").write(
                 f'@echo off\n'
-                f'timeout /t 4 /nobreak >nul\n'
+                f'timeout /t 3 /nobreak >nul\n'
+                f'taskkill /f /im ShiraAI.exe >nul 2>&1\n'
+                f'timeout /t 1 /nobreak >nul\n'
                 f'copy /y "{new_exe}" "{curr_exe}"\n'
                 f'del /f /q "{new_exe}"\n'
                 f'explorer "{curr_exe}"\n'
