@@ -1,252 +1,537 @@
 """
-shira_proxy.py — Local proxy server for Shira API
-Requirements:
-    pip install flask requests requests-negotiate-sspi beautifulsoup4 lxml python-docx pdfplumber flask-cors httpx
+shira_proxy.py — v8 final
+pip install flask requests requests-negotiate-sspi beautifulsoup4 lxml python-docx pdfplumber flask-cors
 """
 
-import os
-import ssl
-import urllib3
-import re
-import io
-import json
-import xml.etree.ElementTree as ET
+import os, sys, ssl, urllib3, re, io, json, xml.etree.ElementTree as ET
 
-# ── Kill any existing process on port 5050 before starting ───────────────────
-def _kill_port(port=5050):
-    import subprocess, signal, sys
-    try:
-        if sys.platform == "win32":
-            result = subprocess.check_output(
-                f'netstat -ano | findstr :{port}', shell=True
-            ).decode(errors='ignore')
-            pids = set()
-            for line in result.splitlines():
-                parts = line.split()
-                if len(parts) >= 5 and 'LISTENING' in line:
-                    pids.add(parts[-1])
-            for pid in pids:
-                try:
-                    subprocess.call(f'taskkill /PID {pid} /F', shell=True,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    print(f'[startup] closed old server PID {pid}')
-                except Exception:
-                    pass
-    except Exception:
-        pass
+BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 
-_kill_port(5050)
+# Suppress PyInstaller temp directory cleanup warning
+if getattr(sys, 'frozen', False):
+    import warnings
+    warnings.filterwarnings("ignore")
+
+VERSION = "1.8"
 
 os.environ['NO_PROXY'] = 'shira2,prod-spfe,10.67.60.51,localhost,127.0.0.1'
 urllib3.disable_warnings()
 ssl._create_default_https_context = ssl._create_unverified_context
 
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, send_file
 from flask_cors import CORS
 import requests
 from requests_negotiate_sspi import HttpNegotiateAuth
 from bs4 import BeautifulSoup
 import pdfplumber
-import docx
+import docx as docx_lib
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
 CORS(app)
 
-# ── Embedded frontend HTML ────────────────────────────────────────────────────
-# The HTML is embedded here so the EXE is fully self-contained.
-_HTML = """<!DOCTYPE html>
+SHIRA = "http://shira2"
+SPFE  = "http://prod-spfe:1000"
+PROXY_URL = "http://192.168.174.80:8080"
+
+# ↓↓↓ PUT YOUR GEMINI API KEY HERE ↓↓↓
+GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
+# ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+
+SUMMONS_KW = ['זימון','הזמנה לדיון','הזמנה לישיבה','הודעה על דיון','הזמנת עדים','מועד דיון','נדחה ל','notice','summon']
+
+def is_summons(name):
+    n = (name or '').lower()
+    return any(k in n for k in SUMMONS_KW)
+
+def make_session():
+    s = requests.Session()
+    s.auth = HttpNegotiateAuth()
+    s.headers.update({"Content-Type": "application/json; charset=UTF-8", "Origin": SHIRA, "Referer": f"{SHIRA}/App/main/files/files-list"})
+    s.proxies = {"http": None, "https": None}
+    return s
+
+SESSION = make_session()
+
+def anonymize(text):
+    text = re.sub(r'\b\d{9}\b', '[תז]', text)
+    text = re.sub(r'\b0\d{1,2}[-\s]?\d{3}[-\s]?\d{4}\b', '[טלפון]', text)
+    text = re.sub(r'[\w.+\-]+@[\w\-]+\.\w+', '[מייל]', text)
+    return text
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route("/")
+def index():
+    return Response(HTML_PAGE, mimetype="text/html; charset=utf-8")
+
+@app.route("/app.js")
+def js_file():
+    return Response(JS_CODE, mimetype="application/javascript; charset=utf-8")
+
+@app.route("/api/health")
+def health():
+    return jsonify({"status": "ok"})
+
+@app.route("/api/me")
+def me():
+    COURTS = {1:"ירושלים",2:"תל אביב",3:"חיפה",4:"פתח תקוה",5:"רחובות",6:"באר שבע",7:"טבריה",8:"צפת",9:"אשדוד",10:"אשקלון",11:"נתניה",12:"בית הדין הגדול",13:"אריאל"}
+    try:
+        r = SESSION.get(f"{SHIRA}/api/api/userController/GetUser", timeout=10)
+        r.raise_for_status()
+        d  = r.json()
+        cl = d.get("courtList", [])
+        if cl:
+            cid = cl[0]["courtId"]
+            courts = [{"courtId": c["courtId"], "courtName": c.get("courtName") or COURTS.get(c["courtId"], str(c["courtId"]))} for c in cl]
+            return jsonify({"courtId": cid, "courtName": cl[0].get("courtName") or COURTS.get(cid, str(cid)), "userName": d.get("userName",""), "firstName": d.get("firstName",""), "lastName": d.get("lastName",""), "courtList": courts})
+        return jsonify({"error": "no court"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/search", methods=["POST"])
+def search():
+    id_num = (request.json or {}).get("idNum", "").strip()
+    if not id_num: return jsonify({"error": "idNum required"}), 400
+    p = {"courtID":None,"assemblyId":None,"fileNumber":None,"fileMainID":None,"subjectID":None,"subjectSubID":None,"Composition":None,"FileStatusOpen":"-1","FirstName":None,"IdNum1":id_num,"IdType1":1,"IsOnlineFile":False,"LastName":None,"OldFileNum":"","currentPage":1,"fileStatusID":None,"insertDateFrom":None,"insertDateTo":None,"isCorrectName":False,"isPriority":False,"meetingDateFrom":None,"meetingDateTo":None,"rowsPerPage":100}
+    try:
+        r = SESSION.post(f"{SHIRA}/api/api/FileSearch/GetAdvancedFileSearch", json=p, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        for f in data: f["sideB"] = f.get("sideB") or ""
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/search-case", methods=["POST"])
+def search_case():
+    b    = request.json or {}
+    fmid = b.get("fileMainId", "").strip()
+    fn   = b.get("fileNumber")
+    if not fmid: return jsonify({"error": "fileMainId required"}), 400
+    p = {"courtID":None,"assemblyId":None,"fileNumber":int(fn) if fn else None,"fileMainID":int(fmid),"subjectID":None,"subjectSubID":None,"Composition":None,"FileStatusOpen":"-1","FirstName":None,"IdNum1":None,"IdType1":1,"IsOnlineFile":False,"LastName":None,"OldFileNum":"","currentPage":1,"fileStatusID":None,"insertDateFrom":None,"insertDateTo":None,"isCorrectName":False,"isPriority":False,"meetingDateFrom":None,"meetingDateTo":None,"rowsPerPage":100}
+    try:
+        r = SESSION.post(f"{SHIRA}/api/api/FileSearch/GetAdvancedFileSearch", json=p, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        for f in data: f["sideB"] = f.get("sideB") or ""
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/search-name", methods=["POST"])
+def search_name():
+    b  = request.json or {}
+    ln = b.get("lastName", "").strip()
+    fn = b.get("firstName", "").strip()
+    if not ln and not fn: return jsonify({"error": "name required"}), 400
+    def do(last, first):
+        p = {"courtID":None,"assemblyId":None,"fileNumber":None,"fileMainID":None,"subjectID":None,"subjectSubID":None,"Composition":None,"FileStatusOpen":"-1","FirstName":first or None,"LastName":last or None,"IdNum1":None,"IdType1":1,"IsOnlineFile":False,"OldFileNum":"","currentPage":1,"fileStatusID":None,"insertDateFrom":None,"insertDateTo":None,"isCorrectName":False,"isPriority":False,"meetingDateFrom":None,"meetingDateTo":None,"rowsPerPage":100}
+        r = SESSION.post(f"{SHIRA}/api/api/FileSearch/GetAdvancedFileSearch", json=p, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    try:
+        results = {}
+        for f in do(ln, fn):
+            f["sideB"] = f.get("sideB") or ""
+            results[f.get("fileId", f.get("fileNumber",""))] = f
+        if ln and fn:
+            for f in do(fn, ln):
+                f["sideB"] = f.get("sideB") or ""
+                k = f.get("fileId", f.get("fileNumber",""))
+                if k not in results: results[k] = f
+        return jsonify(list(results.values()))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/documents/<int:file_id>")
+def documents(file_id):
+    url = f"{SHIRA}/classic/Forms/File/Contents/FileDocs.aspx?userid=0&courtid=0&FileID={file_id}&EntityId={file_id}&EntityTypeId=6"
+    try:
+        r    = SESSION.get(url, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "lxml")
+        docs = []
+        table = soup.find("table", id="grdFileDocs")
+        if not table:
+            for t in soup.find_all("table"):
+                if "OpenDocument" in str(t): table = t; break
+        if table:
+            for tr in table.find_all("tr"):
+                m = re.search(r"OpenDocument\((\d+)\)", str(tr))
+                if not m: continue
+                did  = m.group(1)
+                link = tr.find("a", onclick=True) or tr.find("a")
+                name = (link.get_text(strip=True) if link else "") or f"מסמך {did}"
+                rt   = tr.get_text(" ", strip=True)
+                dm   = re.search(r"\d{2}/\d{2}/\d{4}", rt)
+                date = dm.group(0) if dm else ""
+                ext  = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                docs.append({"docId": did, "name": name, "date": date, "type": "pdf" if ext == "pdf" else "docx", "openUrl": f"{SHIRA}/classic/Forms/Documents/DM/DMOpenDocument.aspx?DocIDs={did}&Action=1"})
+        return jsonify(docs)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/doctext/<doc_id>")
+def doc_text(doc_id):
+    try:
+        xml = f"<XmlData><DocumentID>{doc_id}</DocumentID></XmlData>"
+        r1  = SESSION.post(f"{SHIRA}/classic/WS/App/WsShiraUtils.asmx/GetDocumentDetails", data=xml.encode("utf-8"), headers={"Content-Type": "application/xml"}, timeout=10)
+        root = ET.fromstring(r1.text)
+        dn   = root.find("DocNumber")
+        if dn is None or not dn.text: return jsonify({"text": "", "error": "DocNumber not found"})
+        r2   = SESSION.post(f"{SPFE}/ShiraDocsMngWS.asmx/GetDocumentUrlAndStatus", data=f"{{'docNumber':'{dn.text.strip()}','isCopy':'true'}}", headers={"Content-Type": "application/json"}, timeout=10)
+        res  = r2.json().get("d", "")
+        furl = res.split("|")[0] if "|" in res else res
+        if not furl or furl == "-1": return jsonify({"text": "", "error": "URL not found"})
+        r3   = SESSION.get(furl, timeout=20)
+        r3.raise_for_status()
+        buf  = io.BytesIO(r3.content)
+        ext  = furl.rsplit(".", 1)[-1].lower()
+        text = ""
+        if ext == "pdf":
+            with pdfplumber.open(buf) as pdf:
+                text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+        elif ext in ("docx", "doc"):
+            text = "\n".join(p.text for p in docx_lib.Document(buf).paragraphs)
+        else:
+            text = r3.content.decode("utf-8", errors="ignore")[:50000]
+        return jsonify({"text": text[:30000]})
+    except Exception as e:
+        return jsonify({"text": "", "error": str(e)})
+
+@app.route("/api/hearings/<int:file_id>")
+def hearings(file_id):
+    url = f"{SHIRA}/classic/Forms/File/Contents/FileMeetings.aspx?userid=0&courtid=0&FileID={file_id}&EntityId={file_id}&EntityTypeId=6"
+    try:
+        r    = SESSION.get(url, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "lxml")
+        tbl  = soup.find("table", id="grdMeetings") or soup.find("table")
+        if not tbl: return jsonify([])
+        rows = []
+        for tr in tbl.find_all("tr")[1:]:
+            tds   = tr.find_all("td")
+            cells = [td.get_text(strip=True) for td in tds]
+            if len(cells) < 3: continue
+            # Extract protocol doc ID from OpenDocument link in this row
+            proto_match = re.search(r"OpenDocument\((\d+)\)", str(tr))
+            proto_id    = proto_match.group(1) if proto_match else None
+            rows.append({
+                "hebrewDate":     cells[0] if len(cells) > 0 else "",
+                "date":           cells[1] if len(cells) > 1 else "",
+                "purpose":        cells[2] if len(cells) > 2 else "",
+                "status":         cells[3] if len(cells) > 3 else "",
+                "timeFrom":       cells[4] if len(cells) > 4 else "",
+                "timeTo":         cells[5] if len(cells) > 5 else "",
+                "panel":          cells[6] if len(cells) > 6 else "",
+                "protoStatus":    cells[8] if len(cells) > 8 else "",
+                "protocolDocId":  proto_id,
+            })
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/ai", methods=["POST"])
+def ai_proxy():
+    b    = request.json or {}
+    msg  = b.get("messages", [{}])[0].get("content", "")
+    sys_ = b.get("system", "אתה עוזר משפטי לבית הדין הרבני. ענה בעברית בלבד. ללא markdown.")
+    msg  = anonymize(msg[:200000])
+    url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+    print(f"[ai] sending {len(msg)} chars to Gemini")
+
+    @stream_with_context
+    def gen():
+        try:
+            with requests.post(url, json={"contents": [{"parts": [{"text": msg}]}], "systemInstruction": {"parts": [{"text": sys_}]}}, proxies={"https": None, "http": None}, verify=False, timeout=180, stream=True) as resp:
+                print(f"[ai] status={resp.status_code}")
+                for line in resp.iter_lines():
+                    if not line: continue
+                    if isinstance(line, bytes): line = line.decode("utf-8")
+                    if not line.startswith("data:"): continue
+                    cs = line[5:].strip()
+                    if cs == "[DONE]": break
+                    try:
+                        cd = json.loads(cs)
+                        # debug
+                        cands = cd.get("candidates", [])
+                        if cands and cands[0].get("finishReason"):
+                            print(f"[ai] finishReason={cands[0]['finishReason']}")
+                        all_parts = cd.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                        if all_parts:
+                            print(f"[ai] parts={[(p.get('thought',False), len(p.get('text',''))) for p in all_parts]}")
+                        for p in all_parts:
+                            if p.get("thought", False):
+                                continue
+                            t = p.get("text", "")
+                            if t:
+                                t = t.replace("**","").replace("*","").replace("##","").replace("#","")
+                                yield f"data: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
+                        u = cd.get("usageMetadata")
+                        if u:
+                            inp = u.get("promptTokenCount", 0)
+                            out = u.get("candidatesTokenCount", 0)
+                            thi = u.get("thoughtsTokenCount", 0)
+                            cost = (inp/1e6)*0.15 + (out/1e6)*0.60 + (thi/1e6)*3.50
+                            import datetime
+                            entry = {"ts": datetime.datetime.now().isoformat(timespec="seconds"), "input": inp, "output": out, "thinking": thi, "total": u.get("totalTokenCount",0), "usd": round(cost,6), "ils": round(cost*3.7,4)}
+                            try:
+                                lp = os.path.join(BASE_DIR, "usage_log.jsonl")
+                                open(lp, "a", encoding="utf-8").write(json.dumps(entry, ensure_ascii=False) + "\n")
+                            except: pass
+                            yield f"data: {json.dumps({'usage': entry})}\n\n"
+                    except json.JSONDecodeError: continue
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return Response(gen(), mimetype="text/event-stream", headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
+
+@app.route("/api/export-docx", methods=["POST"])
+def export_docx():
+    import datetime, docx as _docx
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    b = request.json or {}
+    text = b.get("text", "").strip()
+    if not text: return jsonify({"error": "no text"}), 400
+    case_number = b.get("caseNumber", "")
+    case_title  = b.get("caseTitle", "")
+    court_name  = b.get("courtName", "בית הדין הרבני")
+    doc = _docx.Document()
+    sec = doc.sections[0]
+    sec.page_width=7560310; sec.page_height=10692130; sec.left_margin=900430; sec.right_margin=1141095; sec.top_margin=331470; sec.bottom_margin=810260
+    doc.element.body.get_or_add_sectPr().append(OxmlElement('w:bidi'))
+    def ap(txt, bold=False, center=False, sb=4, sa=4, fs=None, color=None):
+        p  = doc.add_paragraph()
+        pf = p.paragraph_format; pf.space_before=Pt(sb); pf.space_after=Pt(sa)
+        pf.alignment = WD_ALIGN_PARAGRAPH.CENTER if center else WD_ALIGN_PARAGRAPH.JUSTIFY
+        pp = p._p.get_or_add_pPr(); pp.append(OxmlElement('w:bidi'))
+        jc = OxmlElement('w:jc'); jc.set(qn('w:val'), 'center' if center else 'both'); pp.append(jc)
+        run = p.add_run(txt); run.font.name='FrankRuehl'; run.font.size=Pt(fs or 14); run.font.bold=bold
+        if color: run.font.color.rgb = RGBColor(*color)
+        rp = run._r.get_or_add_rPr(); rp.append(OxmlElement('w:rtl'))
+        lg = OxmlElement('w:lang'); lg.set(qn('w:bidi'), 'he-IL'); rp.append(lg)
+    ap("בבית הדין הרבני האזורי", bold=True, center=True, sb=6, sa=2)
+    ap(court_name, bold=True, center=True, sa=6)
+    if case_number: ap(f"תיק מס' {case_number}", center=True, sa=2)
+    if case_title:  ap(case_title, center=True, sa=6)
+    ap("סיכום AI", bold=True, center=True, sb=6, sa=10)
+    for para in [p.strip() for p in text.split('\n') if p.strip()]:
+        is_h = len(para) < 60 and not para.endswith(('.', ',', ':', ')')) and not para[0].isdigit()
+        ap(para, bold=is_h, sb=8 if is_h else 3, sa=4 if is_h else 3)
+    now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+    ap(f"הופק על ידי מערכת שירה AI  |  {now}", fs=9, center=True, color=(150,150,150))
+    buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+    fn  = f"סיכום_AI_{case_number or 'תיק'}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.docx"
+    return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document", as_attachment=True, download_name=fn)
+
+STYLE_FILE      = os.path.join(BASE_DIR, "style_example.txt")
+UPDATE_URL_FILE = os.path.join(BASE_DIR, "update_url.txt")
+
+def get_update_url():
+    try:
+        if os.path.exists(UPDATE_URL_FILE):
+            return open(UPDATE_URL_FILE, encoding="utf-8").read().strip().rstrip('/')
+    except: pass
+    return None
+
+@app.route("/api/check-update")
+def check_update():
+    base = get_update_url()
+    if not base:
+        return jsonify({"current": VERSION, "latest": VERSION, "hasUpdate": False})
+    try:
+        r = requests.get(f"{base}/version.txt", timeout=5, proxies={"http":None,"https":None})
+        latest = r.text.strip()
+        has = latest != VERSION
+        return jsonify({"current": VERSION, "latest": latest, "hasUpdate": has,
+                        "downloadUrl": f"{base}/ShiraAI.exe" if has else None})
+    except Exception as e:
+        return jsonify({"current": VERSION, "latest": VERSION, "hasUpdate": False, "error": str(e)})
+
+@app.route("/api/do-update", methods=["POST"])
+def do_update():
+    base = get_update_url()
+    if not base:
+        return jsonify({"error": "no update URL configured"}), 400
+    try:
+        r = requests.get(f"{base}/ShiraAI.exe", timeout=120, stream=True, proxies={"http":None,"https":None})
+        r.raise_for_status()
+        new_exe  = os.path.join(BASE_DIR, "ShiraAI_update.exe")
+        curr_exe = sys.executable if getattr(sys, 'frozen', False) else None
+        with open(new_exe, "wb") as f:
+            for chunk in r.iter_content(65536): f.write(chunk)
+        if curr_exe:
+            bat = os.path.join(BASE_DIR, "_updater.bat")
+            open(bat, "w", encoding="ascii").write(
+                f'@echo off\n'
+                f':wait\n'
+                f'tasklist /fi "imagename eq ShiraAI.exe" | find /i "ShiraAI.exe" >nul\n'
+                f'if not errorlevel 1 (\n'
+                f'    timeout /t 1 /nobreak >nul\n'
+                f'    goto wait\n'
+                f')\n'
+                f'timeout /t 2 /nobreak >nul\n'
+                f'copy /y "{new_exe}" "{curr_exe}"\n'
+                f'del /f /q "{new_exe}"\n'
+                f'powershell -Command "Start-Process \'{curr_exe}\'"\n'
+                f'del "%~0"\n'
+            )
+            import subprocess, threading
+            subprocess.Popen(['cmd', '/c', bat], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+            threading.Timer(1.0, lambda: os._exit(0)).start()
+            return jsonify({"ok": True, "restart": True})
+        return jsonify({"ok": True, "restart": False, "msg": "Downloaded to ShiraAI_update.exe"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/style-example", methods=["GET"])
+def get_style_example():
+    try:
+        if os.path.exists(STYLE_FILE):
+            return jsonify({"text": open(STYLE_FILE, encoding="utf-8").read()})
+        return jsonify({"text": ""})
+    except Exception as e:
+        return jsonify({"text": "", "error": str(e)})
+
+@app.route("/api/style-example", methods=["POST"])
+def save_style_example():
+    try:
+        text = (request.json or {}).get("text", "")
+        open(STYLE_FILE, "w", encoding="utf-8").write(text)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/usage")
+def usage():
+    lp = os.path.join(BASE_DIR, "usage_log.jsonl")
+    if not os.path.exists(lp): return jsonify({"queries":0,"total_tokens":0,"total_usd":0,"total_ils":0,"last_queries":[]})
+    entries = []
+    try:
+        for line in open(lp, encoding="utf-8"):
+            line = line.strip()
+            if line: entries.append(json.loads(line))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"queries":len(entries),"total_tokens":sum(e.get("total",0) for e in entries),"total_usd":round(sum(e.get("usd",0) for e in entries),4),"total_ils":round(sum(e.get("ils",0) for e in entries),3),"avg_usd":round(sum(e.get("usd",0) for e in entries)/len(entries),4) if entries else 0,"last_queries":entries[-10:]})
+
+
+# ── HTML & JS as raw strings (no escaping issues) ────────────────────────────
+
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>מערכת שירה</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: 'Segoe UI', Arial, sans-serif;
-  direction: rtl;
-  background: #f4f5f7;
-  color: #1a1a2e;
-  font-size: 14px;
-}
-header {
-  background: #1a3a5c;
-  color: #fff;
-  padding: 12px 24px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-header h1 { font-size: 17px; font-weight: 500; }
-header .sub { font-size: 12px; opacity: 0.7; margin-top: 2px; }
-.status-dot {
-  width: 10px; height: 10px; border-radius: 50%;
-  background: #ccc; margin-right: auto; margin-left: 8px;
-  transition: background 0.3s;
-}
-.status-dot.ok  { background: #4caf50; }
-.status-dot.err { background: #f44336; }
-.status-label { font-size: 12px; opacity: 0.8; }
-.user-chip {
-  font-size: 12px;
-  background: rgba(255,255,255,0.15);
-  border-radius: 20px;
-  padding: 4px 12px;
-  opacity: 0.9;
-}
-.container { max-width: 1100px; margin: 0 auto; padding: 20px 16px; }
-.card {
-  background: #fff;
-  border: 1px solid #e0e4ea;
-  border-radius: 10px;
-  padding: 20px;
-  margin-bottom: 16px;
-}
-.card-title {
-  font-size: 13px; font-weight: 600; color: #555;
-  margin-bottom: 14px; display: flex; align-items: center; gap: 8px;
-  text-transform: uppercase; letter-spacing: 0.5px;
-}
-.row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-input[type=text] {
-  flex: 1; height: 38px;
-  border: 1px solid #d0d5dd; border-radius: 7px;
-  padding: 0 12px; font-size: 14px; direction: rtl;
-  outline: none; transition: border 0.2s;
-}
-input[type=text]:focus { border-color: #1a3a5c; box-shadow: 0 0 0 3px rgba(26,58,92,0.12); }
-input[type=text]::placeholder { color: #aaa; }
-button {
-  height: 38px; padding: 0 18px;
-  border: 1px solid #d0d5dd; border-radius: 7px;
-  background: #fff; color: #1a1a2e;
-  font-size: 14px; cursor: pointer;
-  transition: all 0.15s; white-space: nowrap;
-}
-button:hover  { background: #f0f4f8; }
-button:active { transform: scale(0.98); }
-button.primary { background: #1a3a5c; color: #fff; border-color: #1a3a5c; }
-button.primary:hover { background: #14304d; }
-button.sm { height: 30px; padding: 0 12px; font-size: 12px; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th {
-  text-align: right; padding: 9px 12px;
-  background: #f8f9fb; color: #555; font-weight: 600;
-  border-bottom: 1px solid #e0e4ea; position: sticky; top: 0;
-}
-td { padding: 9px 12px; border-bottom: 1px solid #f0f2f5; vertical-align: middle; }
-tr.clickable:hover { background: #f0f6ff; cursor: pointer; }
-tr.selected { background: #e8f0fe !important; }
-.badge { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 600; }
-.b-open    { background: #e6f4ea; color: #2e7d32; }
-.b-closed  { background: #f3f4f6; color: #555; }
-.b-pending { background: #fff8e1; color: #e65100; }
-.tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid #e0e4ea; }
-.tab {
-  padding: 8px 16px; border-radius: 7px 7px 0 0;
-  font-size: 13px; cursor: pointer;
-  border: 1px solid transparent; background: transparent;
-  color: #666; border-bottom: none; position: relative; bottom: -1px;
-}
-.tab.active { background: #fff; border-color: #e0e4ea; border-bottom-color: #fff; color: #1a3a5c; font-weight: 600; }
-.tab:hover:not(.active) { background: #f0f4f8; }
-.empty { color: #aaa; text-align: center; padding: 28px; font-size: 13px; }
-.spinner {
-  display: inline-block; width: 16px; height: 16px;
-  border: 2px solid #ddd; border-top-color: #1a3a5c;
-  border-radius: 50%; animation: spin 0.7s linear infinite;
-  vertical-align: middle; margin-left: 6px;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-.ai-box {
-  background: #f8f9fb; border: 1px solid #e0e4ea;
-  border-radius: 8px; padding: 14px 16px;
-  font-size: 13px; line-height: 1.75;
-  white-space: pre-wrap; min-height: 80px; color: #222;
-}
-.ai-box.loading { color: #999; font-style: italic; }
-.ai-cursor { display: inline-block; width: 2px; height: 14px; background: #1a3a5c; animation: blink 0.8s step-end infinite; vertical-align: middle; margin-right: 2px; }
-@keyframes blink { 50% { opacity: 0; } }
-.doc-row {
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 4px; border-bottom: 1px solid #f0f2f5;
-}
-.doc-row:hover { background: #f8f9fb; }
-.doc-name { flex: 1; font-size: 13px; }
-.doc-date { color: #888; font-size: 12px; white-space: nowrap; }
-.doc-type { font-size: 11px; color: #888; background: #f0f2f5; padding: 1px 7px; border-radius: 10px; }
-.match-badge { font-size: 11px; color: #e65100; background: #fff3e0; padding: 2px 7px; border-radius: 10px; }
-mark { background: #fff176; border-radius: 2px; padding: 0 1px; }
-.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
-.stat { background: #f8f9fb; border-radius: 8px; padding: 12px 14px; text-align: center; }
-.stat-val { font-size: 20px; font-weight: 600; color: #1a3a5c; }
-.stat-lbl { font-size: 11px; color: #888; margin-top: 3px; }
-.hearing-row { padding: 8px 4px; border-bottom: 1px solid #f0f2f5; font-size: 13px; display: flex; gap: 12px; align-items: center; }
-.hearing-date { font-weight: 600; color: #1a3a5c; min-width: 90px; }
-.soon { background: #fff3e0; color: #e65100; padding: 1px 7px; border-radius: 10px; font-size: 11px; }
-.error-msg { color: #c62828; background: #ffebee; border-radius: 6px; padding: 8px 12px; font-size: 13px; }
-.mode-banner { border-radius: 8px; padding: 8px 14px; font-size: 12px; margin-bottom: 16px; font-weight: 500; }
-.mode-banner-user { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
-.mode-banner-dev  { background: #fff8e1; color: #e65100; border: 1px solid #ffe0b2; }
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;direction:rtl;background:#f4f5f7;color:#1a1a2e;font-size:14px}
+header{background:#1a3a5c;color:#fff;padding:12px 24px;display:flex;align-items:center;gap:12px}
+header h1{font-size:17px;font-weight:500}
+.sub{font-size:12px;opacity:.7;margin-top:2px}
+.status-dot{width:10px;height:10px;border-radius:50%;background:#ccc;margin-right:auto;margin-left:8px}
+.status-dot.ok{background:#4caf50}.status-dot.err{background:#f44336}
+.status-label{font-size:12px;opacity:.8}
+.user-chip{font-size:12px;background:rgba(255,255,255,.15);border-radius:20px;padding:4px 12px}
+.container{max-width:1100px;margin:0 auto;padding:20px 16px}
+.card{background:#fff;border:1px solid #e0e4ea;border-radius:10px;padding:20px;margin-bottom:16px}
+.card-title{font-size:13px;font-weight:600;color:#555;margin-bottom:14px;text-transform:uppercase;letter-spacing:.5px}
+.row{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+input[type=text]{flex:1;height:38px;border:1px solid #d0d5dd;border-radius:7px;padding:0 12px;font-size:14px;direction:rtl;outline:none}
+input[type=text]:focus{border-color:#1a3a5c}
+button{height:38px;padding:0 18px;border:1px solid #d0d5dd;border-radius:7px;background:#fff;color:#1a1a2e;font-size:14px;cursor:pointer;white-space:nowrap}
+button.primary{background:#1a3a5c;color:#fff;border-color:#1a3a5c}
+button.primary:hover{background:#14304d}
+button.sm{height:30px;padding:0 12px;font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:right;padding:9px 12px;background:#f8f9fb;color:#555;font-weight:600;border-bottom:1px solid #e0e4ea}
+td{padding:9px 12px;border-bottom:1px solid #f0f2f5;vertical-align:middle}
+tr.clickable:hover{background:#f0f6ff;cursor:pointer}
+tr.selected{background:#e8f0fe!important}
+.badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600}
+.b-open{background:#e6f4ea;color:#2e7d32}.b-closed{background:#f3f4f6;color:#555}.b-pending{background:#fff8e1;color:#e65100}
+.tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid #e0e4ea}
+.tab{padding:8px 16px;border-radius:7px 7px 0 0;font-size:13px;cursor:pointer;border:1px solid transparent;background:transparent;color:#666;border-bottom:none;position:relative;bottom:-1px}
+.tab.active{background:#fff;border-color:#e0e4ea;border-bottom-color:#fff;color:#1a3a5c;font-weight:600}
+.empty{color:#aaa;text-align:center;padding:28px;font-size:13px}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid #ddd;border-top-color:#1a3a5c;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+.ai-box{background:#f8f9fb;border:1px solid #e0e4ea;border-radius:8px;padding:14px 16px;font-size:13px;line-height:1.75;white-space:pre-wrap;min-height:80px}
+.ai-cursor{display:inline-block;width:2px;height:14px;background:#1a3a5c;animation:blink .8s step-end infinite;vertical-align:middle}
+@keyframes blink{50%{opacity:0}}
+.doc-row{display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid #f0f2f5}
+.doc-row:hover{background:#f8f9fb}
+.error-msg{color:#c62828;background:#ffebee;border-radius:6px;padding:8px 12px;font-size:13px}
+.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
+.stat{background:#f8f9fb;border-radius:8px;padding:12px 14px;text-align:center}
+.stat-val{font-size:20px;font-weight:600;color:#1a3a5c}
+.stat-lbl{font-size:11px;color:#888;margin-top:3px}
+.hearing-row{padding:8px 4px;border-bottom:1px solid #f0f2f5;font-size:13px;display:flex;gap:12px;align-items:center}
+.hearing-date{font-weight:600;color:#1a3a5c;min-width:90px}
+mark{background:#fff176;border-radius:2px;padding:0 1px}
 </style>
 </head>
 <body>
-
 <header>
-  <div>
-    <h1 id="header-title">מערכת שירה — חיפוש חכם וסיכומי AI</h1>
-    <div class="sub">בתי הדין הרבניים</div>
-  </div>
-  <div style="margin-right:auto;display:flex;align-items:center;gap:10px;">
-    <span class="user-chip" id="user-chip"></span>
-  </div>
+  <div><h1 id="header-title">מערכת שירה — חיפוש חכם וסיכומי AI</h1><div class="sub">בתי הדין הרבניים</div></div>
+  <div style="margin-right:auto;display:flex;align-items:center;gap:10px;"><span class="user-chip" id="user-chip"></span></div>
   <div class="status-dot" id="dot"></div>
   <div class="status-label" id="status-label">מתחבר...</div>
 </header>
 
-<button id="dev-btn" onclick="toggleDevMode()" style="position:fixed;bottom:16px;left:16px;z-index:999;background:rgba(0,0,0,0.06);border:1px solid rgba(0,0,0,0.1);color:#aaa;font-size:11px;padding:5px 10px;border-radius:20px;cursor:pointer;height:auto;opacity:0.4;transition:opacity 0.2s;" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0.4">⚙</button>
-
-<button id="usage-btn" onclick="showUsage()" style="display:none;position:fixed;bottom:16px;left:80px;z-index:999;background:rgba(0,0,0,0.06);border:1px solid rgba(0,0,0,0.1);color:#aaa;font-size:11px;padding:5px 10px;border-radius:20px;cursor:pointer;height:auto;opacity:0.4;transition:opacity 0.2s;" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0.4">📊</button>
-
-<!-- Usage popup -->
-<div id="usage-popup" style="display:none;position:fixed;bottom:50px;left:16px;z-index:1000;background:#fff;border:1px solid #e0e4ea;border-radius:12px;padding:20px;min-width:320px;box-shadow:0 4px 24px rgba(0,0,0,0.12);">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-    <strong style="font-size:13px;color:#1a3a5c;">📊 סטטיסטיקות שימוש</strong>
-    <button onclick="document.getElementById('usage-popup').style.display='none'" style="height:24px;padding:0 8px;font-size:12px;border-radius:6px;">✕</button>
-  </div>
-  <div id="usage-content" style="font-size:13px;color:#444;line-height:2;">טוען...</div>
+<div id="update-banner" style="display:none;background:#e65100;color:#fff;padding:10px 24px;font-size:13px;align-items:center;gap:12px;justify-content:center">
+  <span>🔔 קיים עדכון גרסה</span>
+  <span id="update-version-info" style="opacity:.85"></span>
+  <button onclick="doUpdate()" style="background:#fff;color:#e65100;border:none;border-radius:6px;padding:5px 16px;font-size:13px;cursor:pointer;font-weight:600">התקן עכשיו</button>
+  <button onclick="document.getElementById('update-banner').style.display='none'" style="background:transparent;color:rgba(255,255,255,.7);border:none;cursor:pointer;font-size:16px">✕</button>
 </div>
 
+<!-- Court selection modal -->
+<div id="court-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:2000;display:flex;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:14px;padding:32px 36px;min-width:340px;box-shadow:0 8px 40px rgba(0,0,0,.18);text-align:center">
+    <div style="font-size:15px;font-weight:600;color:#1a3a5c;margin-bottom:6px">כניסה למערכת שירה AI</div>
+    <div id="court-modal-user" style="font-size:13px;color:#888;margin-bottom:20px"></div>
+    <div style="font-size:13px;color:#555;margin-bottom:10px;text-align:right">בחר בית דין</div>
+    <div id="court-modal-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:20px"></div>
+    <button class="primary" style="width:100%;height:42px;font-size:14px" onclick="confirmCourtSelection()">כניסה</button>
+  </div>
+</div>
+
+<button id="dev-btn" onclick="toggleDevMode()" style="position:fixed;bottom:16px;left:16px;z-index:999;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.1);color:#aaa;font-size:11px;padding:5px 10px;border-radius:20px;cursor:pointer;height:auto;opacity:.4" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=.4">⚙</button>
+<button id="usage-btn" onclick="showUsage()" style="display:none;position:fixed;bottom:16px;left:80px;z-index:999;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.1);color:#aaa;font-size:11px;padding:5px 10px;border-radius:20px;cursor:pointer;height:auto;opacity:.4" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=.4">📊</button>
+
+<div id="usage-popup" style="display:none;position:fixed;bottom:50px;left:16px;z-index:1000;background:#fff;border:1px solid #e0e4ea;border-radius:12px;padding:20px;min-width:300px;box-shadow:0 4px 24px rgba(0,0,0,.12)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+    <strong style="font-size:13px;color:#1a3a5c">📊 סטטיסטיקות שימוש</strong>
+    <button onclick="document.getElementById('usage-popup').style.display='none'" style="height:24px;padding:0 8px;font-size:12px">✕</button>
+  </div>
+  <div id="usage-content" style="font-size:13px;color:#444;line-height:2">טוען...</div>
+</div>
+
+<div id="open-doc-msg" style="display:none;position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 20px;border-radius:20px;font-size:13px;z-index:999;white-space:nowrap"></div>
+
 <div class="container">
-
-  <div id="mode-banner" style="display:none"></div>
-
   <div class="card">
     <div class="card-title">🔍 חיפוש תיקים</div>
-    <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid #e0e4ea;padding-bottom:0;">
+    <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid #e0e4ea">
       <button class="tab active" id="stab-id"   onclick="switchSearchTab('id')">לפי ת"ז</button>
       <button class="tab"        id="stab-case" onclick="switchSearchTab('case')">לפי מס' תיק</button>
       <button class="tab"        id="stab-name" onclick="switchSearchTab('name')">לפי שם</button>
     </div>
     <div id="search-id-panel">
-      <div class="row">
-        <input type="text" id="id-input" placeholder='הכנס מספר ת"ז (9 ספרות)' maxlength="9" />
-        <button class="primary" onclick="doSearch()">חפש</button>
-      </div>
+      <div class="row"><input type="text" id="id-input" placeholder='הכנס ת"ז (9 ספרות)' maxlength="9"/><button class="primary" onclick="doSearch()">חפש</button><button onclick="clearSearch()">נקה</button></div>
     </div>
     <div id="search-case-panel" style="display:none">
-      <div class="row">
-        <input type="text" id="case-input" placeholder='מס׳ תיק (לדוגמה: 1488524 או 1488524/1)' />
-        <button class="primary" onclick="doCaseSearch()">חפש</button>
-      </div>
+      <div class="row"><input type="text" id="case-input" placeholder="מס' תיק"/><button class="primary" onclick="doCaseSearch()">חפש</button><button onclick="clearSearch()">נקה</button></div>
     </div>
     <div id="search-name-panel" style="display:none">
-      <div class="row">
-        <input type="text" id="name-first" placeholder="שם פרטי" />
-        <input type="text" id="name-last"  placeholder="שם משפחה" />
-        <button class="primary" onclick="doNameSearch()">חפש</button>
-      </div>
+      <div class="row"><input type="text" id="name-first" placeholder="שם פרטי"/><input type="text" id="name-last" placeholder="שם משפחה"/><button class="primary" onclick="doNameSearch()">חפש</button><button onclick="clearSearch()">נקה</button></div>
     </div>
     <div id="results-area"></div>
   </div>
@@ -265,265 +550,157 @@ mark { background: #fff176; border-radius: 2px; padding: 0 1px; }
     <div id="tab-search"   style="display:none"></div>
     <div id="tab-ai"       style="display:none"></div>
   </div>
-
 </div>
 
-<script>
-const PROXY = "http://localhost:5050";
+<script src="/app.js"></script>
+</body>
+</html>"""
 
-const COURT_NAMES = {
-  1:'ירושלים', 2:'תל אביב', 3:'חיפה', 4:'פתח תקוה',
-  5:'רחובות',  6:'באר שבע', 7:'טבריה', 8:'צפת',
-  9:'אשדוד',  10:'אשקלון', 11:'נתניה',
-  12:'בית הדין הגדול', 13:'אריאל'
-};
 
-// State
-let userCourtId   = null;   // set from /api/me
-let userCourtName = null;
-let userName      = null;
-let devMode       = false;
-let caseDocs      = [];
-let docTexts      = {};
-let selectedCase  = null;
+JS_CODE = r"""
+const PROXY = 'http://localhost:5050';
+const COURT_NAMES = {1:'ירושלים',2:'תל אביב',3:'חיפה',4:'פתח תקוה',5:'רחובות',6:'באר שבע',7:'טבריה',8:'צפת',9:'אשדוד',10:'אשקלון',11:'נתניה',12:'בית הדין הגדול',13:'אריאל'};
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
+let userCourtId=null, userCourtName=null, userName=null, devMode=false;
+let caseDocs=[], docTexts={}, selectedCase=null, summonsHidden=false;
+let allCaseDocs={}, searchRunning=false, searchAborted=false;
+
 async function boot() {
   checkHealth();
   setInterval(checkHealth, 30000);
+  checkForUpdate();
+  // Hide modal initially via JS (it has display:flex in HTML for layout purposes)
+  document.getElementById('court-modal').style.display = 'none';
   try {
-    const r = await fetch(`${PROXY}/api/me`);
+    const r = await fetch(PROXY + '/api/me');
     const d = await r.json();
     if (d.courtId) {
-      userCourtId   = d.courtId;
-      userCourtName = d.courtName || COURT_NAMES[d.courtId] || String(d.courtId);
-      userName      = d.firstName ? `${d.firstName} ${d.lastName}` : d.userName || '';
-      document.getElementById('header-title').textContent =
-        `חיפוש חכם וסיכומי AI — ${userCourtName}`;
-      document.title = `חיפוש חכם וסיכומי AI — ${userCourtName}`;
-      document.getElementById('user-chip').textContent = userName ? `👤 ${userName}` : '';
-      setBanner(false);
-    } else {
-      document.getElementById('mode-banner').textContent = '⚠️ לא ניתן לזהות בית דין — פנה למנהל המערכת';
+      userName = d.firstName ? d.firstName + ' ' + d.lastName : d.userName || '';
+      const courts = d.courtList || [{ courtId: d.courtId, courtName: d.courtName }];
+      if (courts.length > 1) {
+        showCourtModal(courts, userName, d);
+      } else {
+        applyCourtUser(d.courtId, d.courtName || COURT_NAMES[d.courtId] || String(d.courtId), userName);
+      }
     }
-  } catch(e) {
-    document.getElementById('mode-banner').textContent = '⚠️ שגיאה בזיהוי בית דין: ' + e.message;
-  }
+  } catch(e) { console.log('me error:', e); }
 }
 
-function setBanner(dev) {
-  const btn     = document.getElementById('dev-btn');
-  const usageBtn = document.getElementById('usage-btn');
-  const costEls = document.querySelectorAll('.ai-cost');
-  if (dev) {
-    btn.textContent = '⚙ מצב מפתח';
-    btn.style.color = '#e65100';
-    btn.style.borderColor = 'rgba(230,81,0,0.3)';
-    usageBtn.style.display = 'block';
-    costEls.forEach(el => el.style.display = 'inline');
-  } else {
-    btn.textContent = '⚙';
-    btn.style.color = '#aaa';
-    btn.style.borderColor = 'rgba(0,0,0,0.1)';
-    usageBtn.style.display = 'none';
-    document.getElementById('usage-popup').style.display = 'none';
-    costEls.forEach(el => el.style.display = 'none');
-  }
+function showCourtModal(courts, name, meData) {
+  document.getElementById('court-modal-user').textContent = name || '';
+  const list = document.getElementById('court-modal-list');
+  list.innerHTML = courts.map((c, i) =>
+    '<label style="display:flex;align-items:center;gap:10px;background:#f8f9fb;border:2px solid ' + (i===0?'#1a3a5c':'#e0e4ea') + ';border-radius:8px;padding:12px 14px;cursor:pointer;font-size:14px;font-weight:' + (i===0?'600':'400') + '" onclick="selectCourtOption(this,' + c.courtId + ',\'' + (c.courtName||'') + '\')">' +
+    '<span style="font-size:20px">🏛</span>' + (c.courtName || COURT_NAMES[c.courtId] || String(c.courtId)) +
+    '</label>'
+  ).join('');
+  list.dataset.selectedId   = courts[0].courtId;
+  list.dataset.selectedName = courts[0].courtName || COURT_NAMES[courts[0].courtId] || String(courts[0].courtId);
+  document.getElementById('court-modal').style.display = 'flex';
+}
+
+function selectCourtOption(el, courtId, courtName) {
+  document.querySelectorAll('#court-modal-list label').forEach(l => {
+    l.style.borderColor  = '#e0e4ea';
+    l.style.fontWeight   = '400';
+  });
+  el.style.borderColor = '#1a3a5c';
+  el.style.fontWeight  = '600';
+  document.getElementById('court-modal-list').dataset.selectedId   = courtId;
+  document.getElementById('court-modal-list').dataset.selectedName = courtName;
+}
+
+function confirmCourtSelection() {
+  const list = document.getElementById('court-modal-list');
+  const cid  = parseInt(list.dataset.selectedId);
+  const name = list.dataset.selectedName;
+  document.getElementById('court-modal').style.display = 'none';
+  applyCourtUser(cid, name, userName);
+}
+
+function applyCourtUser(courtId, courtName, name) {
+  userCourtId   = courtId;
+  userCourtName = courtName;
+  document.getElementById('header-title').textContent = 'חיפוש חכם וסיכומי AI — ' + courtName;
+  document.title = 'שירה AI — ' + courtName;
+  document.getElementById('user-chip').textContent = name ? '👤 ' + name : '';
 }
 
 function toggleDevMode() {
   if (!devMode) {
     const pwd = prompt('סיסמת מפתח:');
-    if (pwd !== 'ELCH2026') {
-      alert('סיסמה שגויה');
-      return;
-    }
+    if (pwd !== 'ELCH2026') { alert('סיסמה שגויה'); return; }
   }
   devMode = !devMode;
-  setBanner(devMode);
-  document.getElementById('results-area').innerHTML = '';
-  document.getElementById('case-panel').style.display = 'none';
+  document.getElementById('dev-btn').textContent  = devMode ? '⚙ מצב מפתח' : '⚙';
+  document.getElementById('usage-btn').style.display = devMode ? 'block' : 'none';
 }
 
-// ── Health ────────────────────────────────────────────────────────────────────
+async function checkForUpdate() {
+  try {
+    const r = await fetch(PROXY + '/api/check-update');
+    const d = await r.json();
+    if (d.hasUpdate) {
+      const b = document.getElementById('update-banner');
+      document.getElementById('update-version-info').textContent = 'גרסה ' + d.latest + ' זמינה (נוכחית: ' + d.current + ')';
+      b.style.display = 'flex';
+    }
+  } catch(e) {}
+}
+
+async function doUpdate() {
+  const b = document.getElementById('update-banner');
+  b.innerHTML = '<span class="spinner"></span> <span>מוריד עדכון...</span>';
+  try {
+    const r = await fetch(PROXY + '/api/do-update', {method:'POST'});
+    const d = await r.json();
+    if (d.error) { b.innerHTML = '<span style="color:#ffcdd2">שגיאה: ' + d.error + '</span>'; return; }
+    if (d.restart) {
+      b.innerHTML = '<span>✓ העדכון הותקן — המערכת תופעל מחדש...</span>';
+      setTimeout(() => window.close(), 2000);
+    } else {
+      b.innerHTML = '<span>✓ הקובץ הורד. החלף את ShiraAI.exe ידנית.</span>';
+    }
+  } catch(e) { b.innerHTML = '<span style="color:#ffcdd2">שגיאה: ' + e.message + '</span>'; }
+}
+
 async function checkHealth() {
   try {
-    const r = await fetch(`${PROXY}/api/health`);
-    document.getElementById('dot').className = r.ok ? 'status-dot ok' : 'status-dot err';
+    const r = await fetch(PROXY + '/api/health');
+    document.getElementById('dot').className        = r.ok ? 'status-dot ok' : 'status-dot err';
     document.getElementById('status-label').textContent = r.ok ? 'מחובר לשרת' : 'שגיאה';
   } catch {
-    document.getElementById('dot').className = 'status-dot err';
-    document.getElementById('status-label').textContent = 'שגיאה: הפעל את shira_proxy.py';
+    document.getElementById('dot').className        = 'status-dot err';
+    document.getElementById('status-label').textContent = 'שגיאה — הפעל שרת';
   }
 }
 
-// ── Court filter ──────────────────────────────────────────────────────────────
 function applyCourtFilter(data) {
   if (devMode || !userCourtId) return data;
   return data.filter(c => c.courtId === userCourtId);
 }
 
-// ── Search tab switch ─────────────────────────────────────────────────────────
+function clearSearch() {
+  ['id-input','case-input','name-first','name-last'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  document.getElementById('results-area').innerHTML = '';
+  document.getElementById('case-panel').style.display = 'none';
+  // Focus the visible input
+  const panels = {id:'id-input', case:'case-input', name:'name-first'};
+  const active = document.querySelector('.tab.active')?.id?.replace('stab-','');
+  if (active && panels[active]) document.getElementById(panels[active])?.focus();
+}
+
 function switchSearchTab(tab) {
-  document.getElementById('search-id-panel').style.display   = tab === 'id'   ? 'block' : 'none';
-  document.getElementById('search-case-panel').style.display = tab === 'case' ? 'block' : 'none';
-  document.getElementById('search-name-panel').style.display = tab === 'name' ? 'block' : 'none';
-  document.getElementById('stab-id').classList.toggle('active',   tab === 'id');
-  document.getElementById('stab-case').classList.toggle('active', tab === 'case');
-  document.getElementById('stab-name').classList.toggle('active', tab === 'name');
+  ['id','case','name'].forEach(t => {
+    document.getElementById('search-' + t + '-panel').style.display = t === tab ? 'block' : 'none';
+    document.getElementById('stab-' + t).classList.toggle('active', t === tab);
+  });
   document.getElementById('results-area').innerHTML = '';
 }
 
-// ── Search by name ────────────────────────────────────────────────────────────
-async function doNameSearch() {
-  const firstName = document.getElementById('name-first').value.trim();
-  const lastName  = document.getElementById('name-last').value.trim();
-  const area      = document.getElementById('results-area');
-  if (!lastName && !firstName) { area.innerHTML = '<p class="empty">נא להכניס שם משפחה או שם פרטי</p>'; return; }
-  area.innerHTML = '<p class="empty"><span class="spinner"></span> מחפש...</p>';
-  document.getElementById('case-panel').style.display = 'none';
-  try {
-    const r = await fetch(`${PROXY}/api/search-name`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ lastName, firstName })
-    });
-    const data = await r.json();
-    if (data.error) { area.innerHTML = `<div class="error-msg">שגיאה: ${data.error}</div>`; return; }
-    renderResults(Array.isArray(data) ? data : [], area);
-  } catch {
-    area.innerHTML = `<div class="error-msg">לא ניתן להתחבר לשרת. ודא ש-shira_proxy.py פועל.</div>`;
-  }
-}
-
-// ── Render results ────────────────────────────────────────────────────────────
-function renderResults(data, area) {
-  const filtered = applyCourtFilter(data);
-  if (!filtered.length) {
-    area.innerHTML = `<p class="empty">${!devMode && data.length > 0 ? 'לא נמצאו תיקים בבית הדין שלך' : 'לא נמצאו תיקים'}</p>`;
-    return;
-  }
-  window._cases = filtered;
-  let html = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-      <p style="font-size:12px;color:#888;">נמצאו ${filtered.length} תיקים</p>
-      <button class="sm primary" onclick="showSearchAllPanel()" style="font-size:12px;">🔎 חפש בכל התיקים</button>
-    </div>
-    <div id="search-all-panel" style="display:none;background:#f8f9fb;border:1px solid #e0e4ea;border-radius:8px;padding:12px;margin-bottom:12px;">
-      <p style="font-size:12px;color:#555;margin-bottom:8px;">חיפוש בתוכן מסמכי כל ${filtered.length} התיקים</p>
-      <div class="row">
-        <input type="text" id="search-all-q" placeholder="הכנס מילה או ביטוי לחיפוש..." />
-        <button class="primary" onclick="doSearchAllCases()">חפש</button>
-      </div>
-      <div id="search-all-results"></div>
-    </div>
-    <table><thead><tr>
-      <th>מס' תיק</th><th>בית דין</th><th>נושא</th><th>צד א</th><th>צד ב</th><th>סטטוס</th>
-    </tr></thead><tbody>`;
-  filtered.forEach((c, i) => {
-    const cls = c.fileStatusID === 2 ? 'b-closed' : c.fileStatusID === 5 ? 'b-pending' : 'b-open';
-    const status = c.fileStatusName || (c.isClosed ? 'סגור' : 'פתוח');
-    html += `<tr class="clickable" onclick="selectCase(${i})" data-idx="${i}">
-      <td>${c.fullFileMainNumber || c.fileNumber || ''}</td>
-      <td>${c.courtName || ''}</td>
-      <td>${c.subjectSubName || ''}</td>
-      <td>${(c.sideA || '').substring(0,25)}</td>
-      <td>${(c.sideB || '').substring(0,25)}</td>
-      <td><span class="badge ${cls}">${status}</span></td>
-    </tr>`;
-  });
-  html += '</tbody></table>';
-  area.innerHTML = html;
-}
-
-function showSearchAllPanel() {
-  const panel = document.getElementById('search-all-panel');
-  if (!panel) return;
-  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-  if (panel.style.display === 'block') {
-    document.getElementById('search-all-q').focus();
-  }
-}
-
-async function doSearchAllCases() {
-  const q    = document.getElementById('search-all-q').value.trim();
-  const area = document.getElementById('search-all-results');
-  if (!q) return;
-
-  const cases = window._cases || [];
-  if (!cases.length) { area.innerHTML = '<p class="empty">אין תיקים לחיפוש</p>'; return; }
-
-  area.innerHTML = `<p class="empty"><span class="spinner"></span> טוען מסמכים מ-${cases.length} תיקים...</p>`;
-
-  let totalHits = 0;
-  let html = '';
-
-  for (const c of cases) {
-    const fileId = c.fileId || c.fileMainId;
-
-    // Load docs
-    if (!window._allCaseDocs) window._allCaseDocs = {};
-    if (!window._allCaseDocs[fileId]) {
-      try {
-        const r = await fetch(`${PROXY}/api/documents/${fileId}`);
-        window._allCaseDocs[fileId] = await r.json();
-      } catch { window._allCaseDocs[fileId] = []; }
-    }
-    const docs = window._allCaseDocs[fileId] || [];
-
-    // Load texts and search
-    const hits = [];
-    for (const doc of docs) {
-      const key = `all_${doc.docId}`;
-      if (!docTexts[key]) {
-        try {
-          const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`);
-          const d = await r.json();
-          docTexts[key] = d.text || '';
-        } catch { docTexts[key] = ''; }
-      }
-      if (doc.name.includes(q) || (docTexts[key]||'').includes(q)) {
-        hits.push({ ...doc, _textKey: key });
-      }
-    }
-
-    area.innerHTML = `<p class="empty"><span class="spinner"></span> בודק תיק ${c.fileNumber}...</p>`;
-
-    if (hits.length) {
-      totalHits += hits.length;
-      html += `<div style="margin-bottom:14px;">
-        <div style="font-size:12px;font-weight:600;color:#1a3a5c;padding:6px 0;border-bottom:1px solid #e0e4ea;margin-bottom:8px;">
-          📁 ${c.fileNumber} — ${c.subjectSubName || ''}
-          <span style="font-weight:400;color:#888;margin-right:8px;">${hits.length} תוצאות</span>
-        </div>`;
-      hits.forEach(doc => {
-        const text    = docTexts[doc._textKey] || '';
-        const idx     = text.indexOf(q);
-        const snippet = idx >= 0
-          ? '...' + text.substring(Math.max(0,idx-40), idx+q.length+80)
-              .replace(new RegExp(q,'g'), `<mark>${q}</mark>`) + '...'
-          : '';
-        html += `<div class="doc-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
-          <div style="display:flex;gap:8px;align-items:center;width:100%">
-            <span>${doc.type==='pdf'?'📕':'📄'}</span>
-            <strong style="font-size:13px">${doc.name}</strong>
-            <span class="doc-date">${doc.date}</span>
-            <button class="sm primary" style="margin-right:auto" onclick="openDoc('${encodeURIComponent(doc.openUrl)}')">פתח</button>
-          </div>
-          ${snippet ? `<p style="font-size:12px;color:#555;padding-right:24px;line-height:1.7">${snippet}</p>` : ''}
-        </div>`;
-      });
-      html += '</div>';
-    }
-  }
-
-  if (!totalHits) {
-    area.innerHTML = `<p class="empty">לא נמצאו תוצאות עבור "${q}" ב-${cases.length} תיקים</p>`;
-    return;
-  }
-  area.innerHTML = `<p style="font-size:12px;color:#888;margin-bottom:12px;">נמצאו ${totalHits} מסמכים ב-${cases.length} תיקים</p>` + html;
-}
-
-// ── Search by ID ──────────────────────────────────────────────────────────────
 async function doSearch() {
   const idNum = document.getElementById('id-input').value.trim();
   const area  = document.getElementById('results-area');
@@ -531,704 +708,568 @@ async function doSearch() {
   area.innerHTML = '<p class="empty"><span class="spinner"></span> מחפש...</p>';
   document.getElementById('case-panel').style.display = 'none';
   try {
-    const r = await fetch(`${PROXY}/api/search`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ idNum })
-    });
+    const r    = await fetch(PROXY + '/api/search', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idNum})});
     const data = await r.json();
-    if (data.error) { area.innerHTML = `<div class="error-msg">שגיאה: ${data.error}</div>`; return; }
+    if (data.error) { area.innerHTML = '<div class="error-msg">שגיאה: ' + data.error + '</div>'; return; }
     renderResults(Array.isArray(data) ? data : [], area);
-  } catch {
-    area.innerHTML = `<div class="error-msg">לא ניתן להתחבר לשרת. ודא ש-shira_proxy.py פועל.</div>`;
-  }
+  } catch { area.innerHTML = '<div class="error-msg">לא ניתן להתחבר לשרת.</div>'; }
 }
 
-// ── Search by case number ─────────────────────────────────────────────────────
 async function doCaseSearch() {
   const raw  = document.getElementById('case-input').value.trim();
   const area = document.getElementById('results-area');
   if (!raw) { area.innerHTML = '<p class="empty">נא להכניס מספר תיק</p>'; return; }
   const parts      = raw.split('/');
-  const fileMainId = parts[0].replace(/\\D/g, '');
-  const fileNumber = parts[1] ? parts[1].replace(/\\D/g, '') : null;
+  const fileMainId = parts[0].replace(/[^0-9]/g, '');
+  const fileNumber = parts[1] ? parts[1].replace(/[^0-9]/g, '') : null;
   if (!fileMainId) { area.innerHTML = '<p class="empty">מספר תיק לא תקין</p>'; return; }
   area.innerHTML = '<p class="empty"><span class="spinner"></span> מחפש...</p>';
   document.getElementById('case-panel').style.display = 'none';
   try {
-    const r = await fetch(`${PROXY}/api/search-case`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ fileMainId, fileNumber })
-    });
+    const r    = await fetch(PROXY + '/api/search-case', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fileMainId,fileNumber})});
     const data = await r.json();
-    if (data.error) { area.innerHTML = `<div class="error-msg">שגיאה: ${data.error}</div>`; return; }
+    if (data.error) { area.innerHTML = '<div class="error-msg">שגיאה: ' + data.error + '</div>'; return; }
     renderResults(Array.isArray(data) ? data : (data ? [data] : []), area);
-  } catch {
-    area.innerHTML = `<div class="error-msg">לא ניתן להתחבר לשרת. ודא ש-shira_proxy.py פועל.</div>`;
-  }
+  } catch { area.innerHTML = '<div class="error-msg">לא ניתן להתחבר לשרת.</div>'; }
 }
 
-// ── Select case ───────────────────────────────────────────────────────────────
+async function doNameSearch() {
+  const firstName = document.getElementById('name-first').value.trim();
+  const lastName  = document.getElementById('name-last').value.trim();
+  const area      = document.getElementById('results-area');
+  if (!lastName && !firstName) { area.innerHTML = '<p class="empty">נא להכניס שם</p>'; return; }
+  area.innerHTML = '<p class="empty"><span class="spinner"></span> מחפש...</p>';
+  document.getElementById('case-panel').style.display = 'none';
+  try {
+    const r    = await fetch(PROXY + '/api/search-name', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lastName,firstName})});
+    const data = await r.json();
+    if (data.error) { area.innerHTML = '<div class="error-msg">שגיאה: ' + data.error + '</div>'; return; }
+    renderResults(Array.isArray(data) ? data : [], area);
+  } catch { area.innerHTML = '<div class="error-msg">לא ניתן להתחבר לשרת.</div>'; }
+}
+
+function renderResults(data, area) {
+  const filtered = applyCourtFilter(data);
+  if (!filtered.length) { area.innerHTML = '<p class="empty">לא נמצאו תיקים</p>'; return; }
+  window._cases = filtered;
+  let html = '<p style="font-size:12px;color:#888;margin-bottom:8px;">נמצאו ' + filtered.length + ' תיקים</p>';
+  html += '<table><thead><tr><th>מס תיק</th><th>בית דין</th><th>נושא</th><th>צד א</th><th>צד ב</th><th>סטטוס</th></tr></thead><tbody>';
+  filtered.forEach((c, i) => {
+    const cls    = c.fileStatusID === 2 ? 'b-closed' : c.fileStatusID === 5 ? 'b-pending' : 'b-open';
+    const status = c.fileStatusName || (c.isClosed ? 'סגור' : 'פתוח');
+    html += '<tr class="clickable" onclick="selectCase(' + i + ')" data-idx="' + i + '">';
+    html += '<td>' + (c.fullFileMainNumber||c.fileNumber||'') + '</td><td>' + (c.courtName||'') + '</td><td>' + (c.subjectSubName||'') + '</td>';
+    html += '<td>' + (c.sideA||'').substring(0,25) + '</td><td>' + (c.sideB||'').substring(0,25) + '</td>';
+    html += '<td><span class="badge ' + cls + '">' + status + '</span></td></tr>';
+  });
+  html += '</tbody></table>';
+  area.innerHTML = html;
+}
+
 async function selectCase(idx) {
-  selectedCase = window._cases[idx];
-  caseDocs = []; docTexts = {}; _preloadAbort = true;
-  document.getElementById('tab-ai').innerHTML = '';  // clear so renderAITab re-runs for new case
+  selectedCase    = window._cases[idx];
+  caseDocs        = []; docTexts = {}; summonsHidden = false;
+  document.getElementById('tab-ai').innerHTML = '';
   document.querySelectorAll('tr[data-idx]').forEach(r => r.classList.remove('selected'));
-  document.querySelector(`tr[data-idx="${idx}"]`)?.classList.add('selected');
-  document.getElementById('case-heading').textContent =
-    `📁 תיק ${selectedCase.fullFileMainNumber || selectedCase.fileNumber} — ${selectedCase.sideA || ''} / ${selectedCase.sideB || ''}`;
-  document.getElementById('case-stats').innerHTML = `
-    <div class="stat"><div class="stat-val">${selectedCase.courtName||'—'}</div><div class="stat-lbl">בית דין</div></div>
-    <div class="stat"><div class="stat-val">${selectedCase.subjectSubName||'—'}</div><div class="stat-lbl">נושא</div></div>
-    <div class="stat"><div class="stat-val">${selectedCase.isClosed?'סגור':'פתוח'}</div><div class="stat-lbl">סטטוס</div></div>
-  `;
+  const row = document.querySelector('tr[data-idx="' + idx + '"]');
+  if (row) row.classList.add('selected');
+  document.getElementById('case-heading').textContent = '📁 תיק ' + (selectedCase.fullFileMainNumber||selectedCase.fileNumber) + ' — ' + (selectedCase.sideA||'') + ' / ' + (selectedCase.sideB||'');
+  document.getElementById('case-stats').innerHTML =
+    '<div class="stat"><div class="stat-val">' + (selectedCase.courtName||'—') + '</div><div class="stat-lbl">בית דין</div></div>' +
+    '<div class="stat"><div class="stat-val">' + (selectedCase.subjectSubName||'—') + '</div><div class="stat-lbl">נושא</div></div>' +
+    '<div class="stat"><div class="stat-val">' + (selectedCase.isClosed?'סגור':'פתוח') + '</div><div class="stat-lbl">סטטוס</div></div>';
   document.getElementById('case-panel').style.display = 'block';
   switchTab('docs');
-  document.getElementById('case-panel').scrollIntoView({ behavior: 'smooth' });
+  document.getElementById('case-panel').scrollIntoView({behavior:'smooth'});
   loadDocs();
 }
 
-// ── Load documents ────────────────────────────────────────────────────────────
 async function loadDocs() {
   const fileId = selectedCase.fileId || selectedCase.fileMainId;
   try {
-    const r = await fetch(`${PROXY}/api/documents/${fileId}`);
+    const r    = await fetch(PROXY + '/api/documents/' + fileId);
     const data = await r.json();
-    caseDocs = data.error ? [] : data;
+    caseDocs   = data.error ? [] : data;
+    allCaseDocs[fileId] = caseDocs;
     if (document.getElementById('tab-docs').style.display !== 'none') renderDocs('');
-    // Start background preloading after docs list is ready
-    preloadDocTexts();
+    renderDocChecklist();
   } catch { caseDocs = []; }
 }
 
-// ── Background preloading ─────────────────────────────────────────────────────
-let _preloadAbort = false;
-async function preloadDocTexts() {
-  _preloadAbort = false;
-  const toLoad = caseDocs.filter(d => !docTexts[d.docId]);
-  if (!toLoad.length) return;
-  console.log(`[preload] starting background load of ${toLoad.length} docs`);
-  for (const doc of toLoad) {
-    if (_preloadAbort) break;
-    if (docTexts[doc.docId]) continue;
-    try {
-      const ctrl = new AbortController();
-      const tid = setTimeout(() => ctrl.abort(), 8000);
-      try {
-        const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`, { signal: ctrl.signal });
-        clearTimeout(tid);
-        const d = await r.json();
-        docTexts[doc.docId] = d.text || '';
-      } catch { clearTimeout(tid); docTexts[doc.docId] = ''; }
-    } catch { docTexts[doc.docId] = ''; }
-    // Small delay to avoid overwhelming the server
-    await new Promise(res => setTimeout(res, 150));
-  }
-  console.log(`[preload] done — ${Object.keys(docTexts).length} docs in memory`);
-  renderAIDocList(); // refresh checkmarks
-}
-
-// ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach((t, i) =>
     t.classList.toggle('active', ['docs','hearings','search','ai'][i] === tab));
-  ['docs','hearings','search','ai'].forEach(t => {
-    document.getElementById('tab-'+t).style.display = t === tab ? 'block' : 'none';
-  });
+  ['docs','hearings','search','ai'].forEach(t =>
+    document.getElementById('tab-' + t).style.display = t === tab ? 'block' : 'none');
   if (tab === 'docs')     renderDocs('');
   if (tab === 'hearings') loadHearings();
   if (tab === 'search')   renderSearchTab();
   if (tab === 'ai')       renderAITab();
 }
 
-// ── Render docs ───────────────────────────────────────────────────────────────
 function renderDocs(highlight) {
   const el = document.getElementById('tab-docs');
-  if (!caseDocs.length) {
-    el.innerHTML = '<p class="empty"><span class="spinner"></span> טוען מסמכים...</p>'; return;
-  }
+  if (!caseDocs.length) { el.innerHTML = '<p class="empty"><span class="spinner"></span> טוען...</p>'; return; }
   let html = '';
   caseDocs.forEach(d => {
-    const matched = highlight && (d.name.includes(highlight) || (docTexts[d.docId]||'').includes(highlight));
-    const matchBadge = matched ? `<span class="match-badge">מכיל "${highlight}"</span>` : '';
-    const name = highlight
-      ? d.name.replace(new RegExp(highlight,'g'), `<mark>${highlight}</mark>`)
-      : d.name;
-    html += `<div class="doc-row">
-      <span style="font-size:18px">${d.type==='pdf'?'📕':'📄'}</span>
-      <span class="doc-name">${name}</span>
-      ${matchBadge}
-      <span class="doc-type">${d.type.toUpperCase()}</span>
-      <span class="doc-date">${d.date}</span>
-      <button class="sm primary" onclick="openDoc('${encodeURIComponent(d.openUrl)}')">פתח</button>
-    </div>`;
+    const nm = highlight ? d.name.replace(new RegExp(highlight,'g'), '<mark>' + highlight + '</mark>') : d.name;
+    html += '<div class="doc-row">';
+    html += '<span style="font-size:18px">' + (d.type==='pdf'?'📕':'📄') + '</span>';
+    html += '<span style="flex:1;font-size:13px">' + nm + '</span>';
+    html += '<span style="font-size:11px;color:#888;background:#f0f2f5;padding:1px 7px;border-radius:10px">' + d.type.toUpperCase() + '</span>';
+    html += '<span style="color:#888;font-size:12px">' + d.date + '</span>';
+    html += '<button class="sm primary" onclick="openDoc(\'' + encodeURIComponent(d.openUrl) + '\')">פתח</button>';
+    html += '</div>';
   });
   el.innerHTML = html || '<p class="empty">אין מסמכים</p>';
 }
 
-function openDoc(encodedUrl) { window.open(decodeURIComponent(encodedUrl), '_blank'); }
+let _lastSearchTerm = '';
+function openDoc(u, searchTerm) {
+  window.open(decodeURIComponent(u), '_blank');
+  if (searchTerm) {
+    try { navigator.clipboard.writeText(searchTerm); } catch(e) {}
+    const msg = document.getElementById('open-doc-msg');
+    if (msg) {
+      msg.textContent = '📋 "' + searchTerm + '" הועתק ללוח — לחץ Ctrl+F במסמך שנפתח';
+      msg.style.display = 'block';
+      clearTimeout(msg._t);
+      msg._t = setTimeout(() => msg.style.display = 'none', 5000);
+    }
+  }
+}
 
-// ── Hearings ──────────────────────────────────────────────────────────────────
 async function loadHearings() {
   const el = document.getElementById('tab-hearings');
   el.innerHTML = '<p class="empty"><span class="spinner"></span> טוען דיונים...</p>';
   const fileId = selectedCase.fileId || selectedCase.fileMainId;
   try {
-    const r = await fetch(`${PROXY}/api/hearings/${fileId}`);
+    const r    = await fetch(PROXY + '/api/hearings/' + fileId);
     const data = await r.json();
     if (data.error || !data.length) { el.innerHTML = '<p class="empty">לא נמצאו דיונים</p>'; return; }
     const today = new Date();
-    let html = '';
-    data.forEach(row => {
-      const dateStr = row.date || row.MeetingDate || '';
-      const d    = new Date(dateStr);
+    // Decision panel (hidden by default)
+    let html =
+      '<div id="decision-panel" style="display:none;background:#f8f9fb;border:1px solid #e0e4ea;border-radius:10px;padding:16px;margin-bottom:16px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+      '<strong style="font-size:13px;color:#1a3a5c">✍ הכן החלטה מהדיון</strong>' +
+      '<button onclick="document.getElementById(\'decision-panel\').style.display=\'none\'" style="height:26px;padding:0 10px;border:1px solid #e0e4ea;border-radius:6px;background:#fff;font-size:12px;cursor:pointer;color:#aaa">✕</button>' +
+      '</div>' +
+      '<p style="font-size:12px;color:#888;margin-bottom:6px" id="decision-context-label"></p>' +
+      '<textarea id="decision-prompt" rows="4" style="width:100%;border:1px solid #d0d5dd;border-radius:7px;padding:10px 12px;font-size:13px;direction:rtl;resize:vertical;font-family:inherit;line-height:1.7;margin-bottom:10px">על בסיס פרוטוקולי הדיון וכל מסמכי התיק, נסח החלטה מפורטת ומנומקת של בית הדין. ההחלטה תכלול: רקע עובדתי, סיכום טענות הצדדים, דיון והכרעה, וסעד. כתוב בסגנון רשמי של בית דין רבני.</textarea>' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+      '<button class="primary" id="decision-go-btn" onclick="generateDecision()">✨ הכן החלטה</button>' +
+      '<button id="decision-stop-btn" onclick="decisionAborted=true" style="display:none;background:#c62828;color:#fff;border-color:#c62828;height:38px;padding:0 18px;border-radius:7px;font-size:14px;cursor:pointer">⏹ עצור</button>' +
+      '<button onclick="exportDecisionDocx()" style="height:38px;padding:0 14px;border:1px solid #d0d5dd;border-radius:7px;background:#fff;font-size:13px;cursor:pointer">📄 ייצא Word</button>' +
+      '</div>' +
+      '<div id="decision-log" style="margin-top:8px;font-size:11px;color:#aaa"></div>' +
+      '<div id="decision-ans" class="ai-box" style="margin-top:12px;display:none;min-height:100px"></div>' +
+      '</div>';
+    // Table
+    html += '<div style="overflow-x:auto"><table style="font-size:12px">' +
+      '<thead><tr>' +
+      '<th>תאריך</th><th>תאריך עברי</th><th>מטרת דיון</th><th>סטטוס</th><th>משעה</th><th>עד שעה</th><th>הרכב</th><th>פרוטוקול</th><th>פעולה</th>' +
+      '</tr></thead><tbody>';
+    data.forEach((row, i) => {
+      const d    = new Date((row.date||'').split('/').reverse().join('-'));
       const diff = Math.ceil((d - today) / 86400000);
-      const soon = diff >= 0 && diff <= 7 ? `<span class="soon">בעוד ${diff} ימים</span>` : '';
-      html += `<div class="hearing-row">
-        <span class="hearing-date">${dateStr}</span>
-        ${soon}
-        <span style="color:#555">${row.type||''}</span>
-        <span style="color:#888;font-size:12px">${row.panel||''}</span>
-      </div>`;
+      const soon = diff >= 0 && diff <= 7
+        ? '<br><span style="background:#fff3e0;color:#e65100;padding:1px 6px;border-radius:8px;font-size:10px">בעוד ' + diff + ' ימים</span>' : '';
+      const protoCell = row.protocolDocId
+        ? '<a href="' + PROXY.replace('http://','http://') + '" onclick="openDoc(\'' + encodeURIComponent('http://shira2/classic/Forms/Documents/DM/DMOpenDocument.aspx?DocIDs=' + row.protocolDocId + '&Action=1') + '\');return false" style="color:#1a3a5c;font-size:18px" title="פתח פרוטוקול">📋</a>'
+        : '<span style="color:#ddd;font-size:18px">📋</span>';
+      const rowData = encodeURIComponent(JSON.stringify({date: row.date, purpose: row.purpose, protocolDocId: row.protocolDocId}));
+      html += '<tr>' +
+        '<td style="white-space:nowrap;font-weight:600;color:#1a3a5c">' + (row.date||'') + soon + '</td>' +
+        '<td style="white-space:nowrap;color:#888">' + (row.hebrewDate||'') + '</td>' +
+        '<td>' + (row.purpose||row.type||'') + '</td>' +
+        '<td><span class="badge ' + (row.status==='נקבע'?'b-open':row.status==='נדחה'?'b-pending':'b-closed') + '">' + (row.status||'') + '</span></td>' +
+        '<td style="color:#555">' + (row.timeFrom||'') + '</td>' +
+        '<td style="color:#555">' + (row.timeTo||'') + '</td>' +
+        '<td style="font-size:11px;color:#555;max-width:120px">' + (row.panel||'') + '</td>' +
+        '<td style="text-align:center">' + protoCell + ' <span style="font-size:10px;color:#aaa">' + (row.protoStatus||'') + '</span></td>' +
+        '<td><button class="sm primary" style="font-size:11px;white-space:nowrap" onclick="openDecisionPanel(' + "'" + rowData + "'" + ')">✍ החלטה</button></td>' +
+        '</tr>';
     });
+    html += '</tbody></table></div>';
     el.innerHTML = html;
-  } catch { el.innerHTML = `<div class="error-msg">שגיאה בטעינת דיונים</div>`; }
+  } catch(e) { el.innerHTML = '<div class="error-msg">שגיאה בטעינת דיונים: ' + e.message + '</div>'; }
 }
 
-// ── Search in case ────────────────────────────────────────────────────────────
+function openDecisionPanel(rowDataEncoded) {
+  const row = JSON.parse(decodeURIComponent(rowDataEncoded));
+  const panel = document.getElementById('decision-panel');
+  const label = document.getElementById('decision-context-label');
+  if (!panel) return;
+  if (label) label.textContent = 'דיון מתאריך: ' + (row.date||'') + (row.purpose ? ' — ' + row.purpose : '');
+  const prompt = document.getElementById('decision-prompt');
+  if (prompt && row.date) {
+    prompt.value = 'על בסיס פרוטוקול הדיון מתאריך ' + row.date + ' וכל מסמכי התיק, נסח החלטה מפורטת ומנומקת של בית הדין. ההחלטה תכלול: רקע עובדתי, סיכום טענות הצדדים, דיון והכרעה, וסעד. כתוב בסגנון רשמי של בית דין רבני.';
+  }
+  // Store protocol doc id for generateDecision to prioritize
+  panel.dataset.protocolDocId = row.protocolDocId || '';
+  panel.style.display = 'block';
+  panel.scrollIntoView({behavior:'smooth'});
+}
+
+function showDecisionPanel() {
+  const p = document.getElementById('decision-panel');
+  if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
+}
+
+let decisionAborted = false;
+
+async function generateDecision() {
+  const prompt  = document.getElementById('decision-prompt')?.value.trim();
+  const ansEl   = document.getElementById('decision-ans');
+  const logEl   = document.getElementById('decision-log');
+  const goBtn   = document.getElementById('decision-go-btn');
+  const stopBtn = document.getElementById('decision-stop-btn');
+  if (!prompt || !ansEl) return;
+  decisionAborted = false;
+  goBtn.style.display  = 'none';
+  stopBtn.style.display = 'block';
+  ansEl.style.display  = 'block';
+  ansEl.style.color    = '#999';
+  ansEl.style.fontStyle = 'italic';
+  ansEl.innerHTML      = '<span class="spinner"></span> טוען מסמכים...';
+  logEl.textContent    = '';
+
+  // Use only the specific protocol document for this hearing
+  const panel = document.getElementById('decision-panel');
+  const protoId = panel?.dataset?.protocolDocId;
+  let combined = '';
+  if (protoId) {
+    logEl.textContent = 'טוען פרוטוקול...';
+    if (!docTexts[protoId]) {
+      try {
+        const r = await fetch(PROXY + '/api/doctext/' + protoId);
+        const d = await r.json();
+        docTexts[protoId] = d.text || '';
+      } catch { docTexts[protoId] = ''; }
+    }
+    combined = docTexts[protoId] || '';
+    logEl.textContent = combined ? '✓ פרוטוקול נטען (' + combined.length + ' תווים)' : '⚠ הפרוטוקול ריק';
+  } else {
+    logEl.textContent = '⚠ אין פרוטוקול לדיון זה — שולח ללא תוכן';
+  }
+  if (decisionAborted) { ansEl.textContent = 'הופסק'; goBtn.style.display='block'; stopBtn.style.display='none'; return; }
+
+  logEl.textContent = 'שולח ל-Gemini (' + combined.length + ' תווים)...';
+
+  const styleEx = (await fetch(PROXY + '/api/style-example').then(r=>r.json()).catch(()=>({text:''}))).text || '';
+  const sysPrompt = styleEx
+    ? 'אתה דיין בבית הדין הרבני. כתוב בעברית בלבד. ללא markdown ללא כוכביות. השאר שורה ריקה בין כל פסקה.\n\nכתוב בדיוק באותו סגנון ומבנה כמו הדוגמה:\n---\n' + styleEx + '\n---'
+    : 'אתה דיין בבית הדין הרבני. כתוב בעברית בלבד. ללא markdown ללא כוכביות. השאר שורה ריקה בין כל פסקה. כתוב בסגנון רשמי של פסיקה רבנית. פרט ככל האפשר.';
+
+  try {
+    await streamAI(sysPrompt, 'מסמכי תיק:\n\n' + combined + '\n\n---\n' + prompt, ansEl);
+    logEl.textContent = '✓ הסתיים';
+  } catch(e) {
+    ansEl.textContent = 'שגיאה: ' + e.message;
+    logEl.textContent = '';
+  } finally {
+    goBtn.style.display  = 'block';
+    stopBtn.style.display = 'none';
+  }
+}
+
+async function exportDecisionDocx() {
+  const ans = document.getElementById('decision-ans');
+  if (!ans || !ans.textContent || ans.style.display === 'none') { alert('אין החלטה לייצוא'); return; }
+  try {
+    const resp = await fetch(PROXY + '/api/export-docx', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:ans.textContent, caseNumber:selectedCase?.fullFileMainNumber||selectedCase?.fileNumber||'', caseTitle:(selectedCase?.sideA||'')+' נגד '+(selectedCase?.sideB||''), courtName:userCourtName||'בית הדין הרבני'})
+    });
+    if (!resp.ok) { alert('שגיאה בייצוא'); return; }
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    const cd   = resp.headers.get('Content-Disposition') || '';
+    const m    = cd.match(/filename[*]?=(?:UTF-8'')?([^;]+)/i);
+    a.download = m ? decodeURIComponent(m[1].replace('סיכום_AI','החלטה')) : 'החלטה.docx';
+    a.href = url; a.click(); URL.revokeObjectURL(url);
+  } catch(e) { alert('שגיאה: ' + e.message); }
+}
+
 function renderSearchTab() {
-  document.getElementById('tab-search').innerHTML = `
-    <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid #e0e4ea;padding-bottom:0;">
-      <button class="tab active" id="ssub-case" onclick="switchSearchSubTab('case')">תיק נוכחי בלבד</button>
-      <button class="tab"        id="ssub-all"  onclick="switchSearchSubTab('all')">כל תיקי הצדדים</button>
-    </div>
-    <div id="search-sub-case">
-      <div class="row">
-        <input type="text" id="content-q" placeholder="חפש מילה או ביטוי בכל מסמכי התיק..." />
-        <button onclick="doContentSearch()">🔎 חפש</button>
-      </div>
-    </div>
-    <div id="search-sub-all" style="display:none">
-      <div style="background:#f8f9fb;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#555;">
-        מחפש בכל התיקים של: <strong>${selectedCase.sideA || ''}</strong> ו-<strong>${selectedCase.sideB || ''}</strong>
-      </div>
-      <div class="row">
-        <input type="text" id="content-q-all" placeholder="חפש מילה או ביטוי בכל התיקים..." />
-        <button onclick="doContentSearchAll()">🔎 חפש בכולם</button>
-      </div>
-    </div>
-    <div id="content-results"></div>
-  `;
+  const total = window._cases ? window._cases.length : 1;
+  document.getElementById('tab-search').innerHTML =
+    '<div style="margin-bottom:10px;display:flex;gap:16px;align-items:center;flex-wrap:wrap">' +
+    '<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="search-scope" value="case" checked onchange="updateSearchPlaceholder()"> תיק נוכחי בלבד</label>' +
+    '<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="search-scope" value="all" onchange="updateSearchPlaceholder()"> כל ' + total + ' התיקים שנמצאו</label>' +
+    '</div>' +
+    '<div class="row">' +
+    '<input type="text" id="content-q" placeholder="חפש מילה בכל מסמכי התיק..."/>' +
+    '<button id="search-go-btn" class="primary" onclick="doContentSearch()">🔎 חפש</button>' +
+    '<button id="search-stop-btn" onclick="stopSearch()" style="display:none;background:#c62828;color:#fff;border-color:#c62828">⏹ עצור</button>' +
+    '</div>' +
+    '<div id="search-progress" style="display:none;font-size:12px;color:#888;margin-bottom:8px;padding:4px 0"></div>' +
+    '<div id="content-results"></div>';
 }
 
-function switchSearchSubTab(tab) {
-  document.getElementById('search-sub-case').style.display = tab === 'case' ? 'block' : 'none';
-  document.getElementById('search-sub-all').style.display  = tab === 'all'  ? 'block' : 'none';
-  document.getElementById('ssub-case').classList.toggle('active', tab === 'case');
-  document.getElementById('ssub-all').classList.toggle('active',  tab === 'all');
-  document.getElementById('content-results').innerHTML = '';
+function updateSearchPlaceholder() {
+  const scope = document.querySelector('input[name="search-scope"]:checked')?.value;
+  const inp = document.getElementById('content-q');
+  if (inp) inp.placeholder = scope === 'all' ? 'חפש בכל התיקים שנמצאו...' : 'חפש מילה בכל מסמכי התיק...';
 }
+
+function stopSearch() { searchAborted = true; }
 
 async function doContentSearch() {
   const q    = document.getElementById('content-q').value.trim();
   const area = document.getElementById('content-results');
-  if (!q) return;
-  area.innerHTML = '<p class="empty"><span class="spinner"></span> מחפש בתוכן המסמכים...</p>';
-  for (const doc of caseDocs) {
-    if (!docTexts[doc.docId]) {
-      try {
-        const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`);
-        const d = await r.json();
-        docTexts[doc.docId] = d.text || '';
-      } catch { docTexts[doc.docId] = ''; }
-    }
-  }
-  const hits = caseDocs.filter(d => d.name.includes(q) || (docTexts[d.docId]||'').includes(q));
-  if (!hits.length) { area.innerHTML = `<p class="empty">לא נמצאו תוצאות עבור "${q}"</p>`; return; }
-  renderSearchHits(hits, q, area, selectedCase.fileNumber);
-}
-
-async function doContentSearchAll() {
-  const q    = document.getElementById('content-q-all').value.trim();
-  const area = document.getElementById('content-results');
-  if (!q) return;
-
-  // Find all cases with same parties from window._cases
-  const allCases = (window._cases || []).filter(c =>
-    c.sideA === selectedCase.sideA || c.sideB === selectedCase.sideB ||
-    c.sideA === selectedCase.sideB || c.sideB === selectedCase.sideA
-  );
-
-  if (!allCases.length) {
-    area.innerHTML = '<p class="empty">לא נמצאו תיקים נוספים לאותם צדדים. חפש תחילה לפי ת"ז או שם.</p>';
-    return;
-  }
-
-  area.innerHTML = `<p class="empty"><span class="spinner"></span> טוען מסמכים מ-${allCases.length} תיקים...</p>`;
-
-  let totalHits = 0;
-  let html = '';
-
-  for (const c of allCases) {
-    const fileId = c.fileId || c.fileMainId;
-    // Load docs for this case if not already loaded
-    let docs = window._allCaseDocs?.[fileId];
-    if (!docs) {
-      try {
-        const r = await fetch(`${PROXY}/api/documents/${fileId}`);
-        docs = await r.json();
-        if (!window._allCaseDocs) window._allCaseDocs = {};
-        window._allCaseDocs[fileId] = docs;
-      } catch { docs = []; }
-    }
-
-    // Load doc texts and search
-    const hits = [];
-    for (const doc of docs) {
-      const key = `${fileId}_${doc.docId}`;
-      if (!docTexts[key]) {
+  const prog = document.getElementById('search-progress');
+  if (!q || searchRunning) return;
+  const scope = document.querySelector('input[name="search-scope"]:checked')?.value || 'case';
+  const cases = scope === 'all' && window._cases ? window._cases : [selectedCase];
+  searchRunning = true; searchAborted = false;
+  document.getElementById('search-go-btn').style.display  = 'none';
+  document.getElementById('search-stop-btn').style.display = 'block';
+  prog.style.display = 'block';
+  area.innerHTML = '<p class="empty"><span class="spinner"></span> מחפש...</p>';
+  try {
+    const allHits = [];
+    for (let ci = 0; ci < cases.length; ci++) {
+      if (searchAborted) break;
+      const c      = cases[ci];
+      const fileId = c.fileId || c.fileMainId;
+      prog.textContent = 'תיק ' + (ci+1) + '/' + cases.length + ': ' + (c.fullFileMainNumber||c.fileNumber||'');
+      if (!allCaseDocs[fileId]) {
         try {
-          const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`);
+          const r = await fetch(PROXY + '/api/documents/' + fileId);
           const d = await r.json();
-          docTexts[key] = d.text || '';
-        } catch { docTexts[key] = ''; }
+          allCaseDocs[fileId] = d.error ? [] : d;
+        } catch { allCaseDocs[fileId] = []; }
       }
-      if (doc.name.includes(q) || (docTexts[key]||'').includes(q)) {
-        hits.push({ ...doc, _textKey: key });
+      const docs = allCaseDocs[fileId];
+      for (let di = 0; di < docs.length; di++) {
+        if (searchAborted) break;
+        const doc = docs[di];
+        prog.textContent = 'תיק ' + (ci+1) + '/' + cases.length + ' — מסמך ' + (di+1) + '/' + docs.length + ': ' + doc.name;
+        if (!docTexts[doc.docId]) {
+          try {
+            const r = await fetch(PROXY + '/api/doctext/' + doc.docId);
+            const d = await r.json();
+            docTexts[doc.docId] = d.text || '';
+          } catch { docTexts[doc.docId] = ''; }
+        }
+        if (doc.name.includes(q) || (docTexts[doc.docId]||'').includes(q))
+          allHits.push({c, doc, text: docTexts[doc.docId]||''});
       }
     }
-
-    if (hits.length) {
-      totalHits += hits.length;
-      html += `<div style="margin-bottom:14px;">
-        <div style="font-size:12px;font-weight:600;color:#1a3a5c;padding:6px 0;border-bottom:1px solid #e0e4ea;margin-bottom:8px;">
-          📁 תיק ${c.fileNumber} — ${c.subjectSubName || ''}
-          <span style="font-weight:400;color:#888;margin-right:8px;">${hits.length} תוצאות</span>
-        </div>`;
-      hits.forEach(doc => {
-        const text    = docTexts[doc._textKey] || '';
-        const idx     = text.indexOf(q);
-        const snippet = idx >= 0
-          ? '...' + text.substring(Math.max(0, idx-40), idx + q.length + 80)
-              .replace(new RegExp(q, 'g'), `<mark>${q}</mark>`) + '...'
-          : '';
-        html += `<div class="doc-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
-          <div style="display:flex;gap:8px;align-items:center;width:100%">
-            <span>${doc.type==='pdf'?'📕':'📄'}</span>
-            <strong style="font-size:13px">${doc.name.replace(new RegExp(q,'g'),`<mark>${q}</mark>`)}</strong>
-            <span class="doc-date">${doc.date}</span>
-            <button class="sm primary" style="margin-right:auto" onclick="openDoc('${encodeURIComponent(doc.openUrl)}')">פתח</button>
-          </div>
-          ${snippet ? `<p style="font-size:12px;color:#555;padding-right:24px;line-height:1.7">${snippet}</p>` : ''}
-        </div>`;
+    if (!allHits.length) { area.innerHTML = '<p class="empty">' + (searchAborted?'החיפוש הופסק':'לא נמצאו תוצאות') + '</p>'; return; }
+    let html = '<p style="font-size:12px;color:#888;margin-bottom:8px;">נמצאו ' + allHits.length + ' תוצאות' + (searchAborted?' (הופסק)':'') + ':</p>';
+    const byCase = {};
+    allHits.forEach(h => { const k = h.c.fullFileMainNumber||h.c.fileNumber; if(!byCase[k]) byCase[k]={c:h.c,hits:[]}; byCase[k].hits.push(h); });
+    Object.values(byCase).forEach(({c, hits}) => {
+      if (cases.length > 1) html += '<div style="background:#f0f6ff;border-radius:6px;padding:6px 10px;margin:8px 0 4px;font-size:12px;font-weight:600;color:#1a3a5c">📁 תיק ' + (c.fullFileMainNumber||c.fileNumber) + ' — ' + (c.sideA||'') + ' / ' + (c.sideB||'') + '</div>';
+      hits.forEach(({doc, text}) => {
+        const idx  = text.indexOf(q);
+        const snip = idx >= 0 ? '...' + text.substring(Math.max(0,idx-40), idx+q.length+80).replace(new RegExp(q,'g'),'<mark>'+q+'</mark>') + '...' : '';
+        html += '<div class="doc-row" style="flex-direction:column;align-items:flex-start;gap:4px">';
+        const btnId = 'obtn_' + doc.docId;
+        html += '<div style="display:flex;gap:8px;align-items:center;width:100%"><span>'+(doc.type==='pdf'?'📕':'📄')+'</span><strong style="font-size:13px">'+doc.name+'</strong><span style="color:#888;font-size:12px">'+doc.date+'</span><button id="'+btnId+'" class="sm primary" style="margin-right:auto">פתח</button></div>';
+        window._searchBtns = window._searchBtns || {};
+        window._searchBtns[btnId] = {url: doc.openUrl, q};
+        if (snip) html += '<p style="font-size:12px;color:#555;padding-right:24px;line-height:1.7">'+snip+'</p>';
+        html += '</div>';
       });
-      html += '</div>';
+    });
+    area.innerHTML = html;
+    // Wire up open buttons with search term
+    if (window._searchBtns) {
+      Object.entries(window._searchBtns).forEach(([id, {url, q}]) => {
+        const btn = document.getElementById(id);
+        if (btn) btn.onclick = () => openDoc(encodeURIComponent(url), q);
+      });
+      window._searchBtns = {};
     }
-
-    // Update progress
-    area.innerHTML = `<p class="empty"><span class="spinner"></span> בודק תיק ${c.fileNumber}...</p>`;
+  } finally {
+    searchRunning = false; searchAborted = false;
+    document.getElementById('search-go-btn').style.display  = 'block';
+    document.getElementById('search-stop-btn').style.display = 'none';
+    prog.style.display = 'none';
   }
-
-  if (!totalHits) {
-    area.innerHTML = `<p class="empty">לא נמצאו תוצאות עבור "${q}" בכל ${allCases.length} התיקים</p>`;
-    return;
-  }
-  area.innerHTML = `<p style="font-size:12px;color:#888;margin-bottom:12px;">נמצאו ${totalHits} מסמכים ב-${allCases.length} תיקים</p>` + html;
 }
 
-function renderSearchHits(hits, q, area, caseNumber) {
-  let html = `<p style="font-size:12px;color:#888;margin-bottom:8px;">נמצאו ${hits.length} מסמכים:</p>`;
-  hits.forEach(d => {
-    const textKey = d._textKey || d.docId;
-    const text    = docTexts[textKey] || docTexts[d.docId] || '';
-    const idx     = text.indexOf(q);
-    const snippet = idx >= 0
-      ? '...' + text.substring(Math.max(0,idx-40), idx+q.length+80)
-          .replace(new RegExp(q,'g'), `<mark>${q}</mark>`) + '...'
-      : '';
-    html += `<div class="doc-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
-      <div style="display:flex;gap:8px;align-items:center;width:100%">
-        <span>${d.type==='pdf'?'📕':'📄'}</span>
-        <strong style="font-size:13px">${d.name}</strong>
-        <span class="doc-date">${d.date}</span>
-        <button class="sm primary" style="margin-right:auto" onclick="openDoc('${encodeURIComponent(d.openUrl)}')">פתח</button>
-      </div>
-      ${snippet ? `<p style="font-size:12px;color:#555;padding-right:24px;line-height:1.7">${snippet}</p>` : ''}
-    </div>`;
-  });
-  area.innerHTML = html;
+function isSummons(name) {
+  const n  = (name||'').toLowerCase();
+  const kw = ['זימון','הזמנה לדיון','הזמנה לישיבה','הודעה על דיון','הזמנת עדים','מועד דיון','נדחה ל','notice','summon'];
+  return kw.some(k => n.includes(k));
 }
-
-// ── AI tab ────────────────────────────────────────────────────────────────────
-let aiAbortController = null;
-let aiSelectedDocs = new Set(); // manually selected doc IDs
 
 function renderAITab() {
   const el = document.getElementById('tab-ai');
   if (el.innerHTML) return;
-
-  const caseKey = `ai_${selectedCase.fullFileMainNumber || selectedCase.fileNumber}`;
-
-  el.innerHTML = `
-    <div style="margin-bottom:12px;">
-      <p style="font-size:12px;color:#888;margin-bottom:8px;">שאלה חופשית על התיק</p>
-
-      <!-- Document selector panel -->
-      <div style="border:1px solid #e0e4ea;border-radius:8px;padding:12px;margin-bottom:12px;background:#f8f9fb;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px;">
-          <span style="font-size:12px;font-weight:600;color:#1a3a5c;">📋 בחר מסמכים לסיכום</span>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button class="sm" onclick="aiSelectRecent(5)"  style="font-size:11px;">5 אחרונים</button>
-            <button class="sm" onclick="aiSelectRecent(10)" style="font-size:11px;">10 אחרונים</button>
-            <button class="sm" onclick="aiSelectRecent(20)" style="font-size:11px;">20 אחרונים</button>
-            <button class="sm" onclick="aiSelectAll()"      style="font-size:11px;background:#e8f5e9;border-color:#c8e6c9;color:#2e7d32;">כל התיק ⚠️</button>
-            <button class="sm" onclick="aiSelectNone()"     style="font-size:11px;color:#888;">נקה</button>
-          </div>
-        </div>
-        <input type="text" id="ai-doc-filter" placeholder="סנן לפי שם מסמך..." oninput="renderAIDocList()"
-          style="width:100%;margin-bottom:8px;height:32px;font-size:12px;" />
-        <div id="ai-doc-list" style="max-height:200px;overflow-y:auto;border:1px solid #e0e4ea;border-radius:6px;background:#fff;"></div>
-        <div id="ai-doc-count" style="font-size:11px;color:#1a3a5c;margin-top:6px;font-weight:600;"></div>
-      </div>
-
-      <!-- Question input -->
-      <div class="row">
-        <input type="text" id="ai-q" placeholder='לדוגמה: "מה הסוגיות המרכזיות?" או "סכם את הפרוטוקול"' />
-        <button class="primary" id="ai-ask-btn" onclick="askAI()">✨ שאל</button>
-        <button class="sm" id="ai-stop-btn" onclick="stopAI()" style="display:none;background:#c62828;color:#fff;border-color:#c62828;">⏹ עצור</button>
-      </div>
-      <div id="ai-filter-info" style="font-size:11px;color:#1a3a5c;margin-top:6px;display:none;"></div>
-    </div>
-    <div id="ai-progress-wrap" style="display:none;margin-top:10px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-        <span id="ai-progress-text" style="font-size:11px;color:#555;"></span>
-      </div>
-      <div style="background:#e0e4ea;border-radius:4px;height:6px;overflow:hidden;">
-        <div id="ai-progress-bar" style="height:6px;background:#1a3a5c;border-radius:4px;width:0%;transition:width 0.3s ease;"></div>
-      </div>
-    </div>
-    <div id="ai-ans-wrap" style="margin-top:14px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-        <p style="font-size:12px;color:#888;">תשובה</p>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <span class="ai-cost" style="font-size:11px;color:#bbb;display:none;"></span>
-          <button class="sm" onclick="exportDocx()" style="font-size:11px;background:#1a3a5c;color:#fff;border-color:#1a3a5c;">📄 ייצא Word</button>
-          <button class="sm" onclick="clearAIAnswer('${caseKey}')" style="font-size:11px;color:#aaa;border-color:#e0e4ea;">🗑 נקה</button>
-        </div>
-      </div>
-      <div class="ai-box" id="ai-ans" style="min-height:120px;color:#aaa;font-style:italic;">התשובה תופיע כאן...</div>
-    </div>
-  `;
-
-  // Init doc list
-  aiSelectedDocs = new Set();
-  renderAIDocList();
-  aiSelectRecent(10); // default: last 10
-
-  // Restore saved answer if exists
+  const caseKey = 'ai_' + (selectedCase.fullFileMainNumber || selectedCase.fileNumber);
+  el.innerHTML = [
+    '<div style="margin-bottom:16px">',
+    '  <p style="font-size:12px;color:#888;margin-bottom:8px">שאלה על התיק</p>',
+    '  <div class="row"><input type="text" id="ai-q" placeholder="מה הסוגיות המרכזיות?"/><button class="primary" onclick="askAI()">✨ שאל</button></div>',
+    '</div>',
+    '<div style="margin-bottom:16px">',
+    '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">',
+    '    <p style="font-size:12px;color:#888">📋 דוגמה לסגנון הפלט <span style="color:#bbb;font-weight:normal">(הדבק קטע מהחלטה אמיתית — גמיני ילמד ממנה)</span></p>',
+    '    <div style="display:flex;gap:6px">',
+    '      <button class="sm" onclick="saveStyleExample()" style="font-size:11px;background:#e8f5e9;color:#2e7d32;border-color:#a5d6a7">💾 שמור</button>',
+    '      <button class="sm" onclick="clearStyleExample()" style="font-size:11px;color:#aaa">🗑 נקה</button>',
+    '    </div>',
+    '  </div>',
+    '  <textarea id="style-example" rows="5" placeholder="הדבק כאן קטע מהחלטת דיין לדוגמה — גמיני ישתמש בסגנון, הרווחים והמבנה שלה..." style="width:100%;border:1px solid #d0d5dd;border-radius:7px;padding:10px 12px;font-size:12px;direction:rtl;resize:vertical;font-family:inherit;color:#444;line-height:1.7"></textarea>',
+    '  <p id="style-saved-msg" style="font-size:11px;color:#2e7d32;display:none;margin-top:4px">✓ הדוגמה נשמרה</p>',
+    '</div>',
+    '<div style="margin-bottom:16px">',
+    '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">',
+    '    <p style="font-size:12px;color:#888">מסמכים לשליחה ל-AI</p>',
+    '    <div style="display:flex;gap:6px">',
+    '      <button class="sm" onclick="toggleAllDocs(true)"  style="font-size:11px">✓ בחר הכל</button>',
+    '      <button class="sm" onclick="toggleAllDocs(false)" style="font-size:11px">✗ בטל הכל</button>',
+    '    </div>',
+    '  </div>',
+    '  <div style="margin-bottom:6px;display:flex;gap:6px;align-items:center">',
+    '    <button class="sm" id="btn-filter-summons" onclick="filterSummons()" style="font-size:11px;background:#fff3e0;color:#e65100;border-color:#ffcc80">🚫 הסתר זימונים</button>',
+    '    <span id="summons-status" style="font-size:11px;color:#aaa"></span>',
+    '  </div>',
+    '  <div id="doc-checklist" style="background:#f8f9fb;border:1px solid #e0e4ea;border-radius:8px;padding:8px;max-height:180px;overflow-y:auto">',
+    '    <p style="font-size:12px;color:#aaa;text-align:center;padding:8px">טוען מסמכים...</p>',
+    '  </div>',
+    '</div>',
+    '<div style="margin-bottom:12px">',
+    '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">',
+    '    <p style="font-size:12px;color:#888">לוג פעילות</p>',
+    '    <button class="sm" onclick="clearLog()" style="font-size:11px;color:#aaa">נקה</button>',
+    '  </div>',
+    '  <div id="ai-log" style="background:#1a1a2e;color:#7ec8e3;font-size:11px;font-family:monospace;border-radius:6px;padding:8px;max-height:100px;overflow-y:auto;direction:ltr"></div>',
+    '</div>',
+    '<div style="margin-top:14px">',
+    '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">',
+    '    <p style="font-size:12px;color:#888">תשובה</p>',
+    '    <div style="display:flex;gap:8px;align-items:center">',
+    '      <span id="ai-cost" style="font-size:11px;color:#bbb;display:none"></span>',
+    '      <button class="sm" onclick="exportDocx()" style="font-size:11px;background:#1a3a5c;color:#fff;border-color:#1a3a5c">📄 ייצא Word</button>',
+    '      <button class="sm" onclick="clearAI(\'' + caseKey + '\')" style="font-size:11px;color:#aaa;border-color:#e0e4ea">🗑 נקה</button>',
+    '    </div>',
+    '  </div>',
+    '  <div class="ai-box" id="ai-ans" style="min-height:120px;color:#aaa;font-style:italic">התשובה תופיע כאן...</div>',
+    '</div>'
+  ].join('\n');
   const saved = sessionStorage.getItem(caseKey);
-  if (saved) {
-    const ans = document.getElementById('ai-ans');
-    ans.style.color = '#222';
-    ans.style.fontStyle = 'normal';
-    ans.textContent = saved;
-  }
-
-  // Re-apply dev mode visibility
-  if (devMode) {
-    const costEl = el.querySelector('.ai-cost');
-    if (costEl) costEl.style.display = 'inline';
-  }
+  if (saved) { const a=document.getElementById('ai-ans'); a.style.color='#222'; a.style.fontStyle='normal'; a.textContent=saved; }
+  if (devMode) { const c=document.getElementById('ai-cost'); if(c) c.style.display='inline'; }
+  fetch(PROXY + '/api/style-example').then(r=>r.json()).then(d=>{ const t=document.getElementById('style-example'); if(t&&d.text) t.value=d.text; }).catch(()=>{});
+  renderDocChecklist();
 }
 
-// ── AI doc selector helpers ───────────────────────────────────────────────────
-function renderAIDocList() {
-  const filter = (document.getElementById('ai-doc-filter')?.value || '').toLowerCase();
-  const list   = document.getElementById('ai-doc-list');
-  const count  = document.getElementById('ai-doc-count');
-  if (!list) return;
+async function saveStyleExample() {
+  const t = document.getElementById('style-example');
+  if (!t) return;
+  try {
+    await fetch(PROXY + '/api/style-example', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text: t.value})});
+    const msg = document.getElementById('style-saved-msg');
+    if (msg) { msg.style.display='block'; setTimeout(()=>msg.style.display='none', 2000); }
+  } catch(e) { alert('שגיאה בשמירה: ' + e.message); }
+}
 
-  const filtered = caseDocs.filter(d => !filter || d.name.toLowerCase().includes(filter) || d.date.includes(filter));
+async function clearStyleExample() {
+  try {
+    await fetch(PROXY + '/api/style-example', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text: ''})});
+    const t = document.getElementById('style-example');
+    if (t) t.value = '';
+  } catch(e) {}
+}
 
-  if (!filtered.length) {
-    list.innerHTML = '<p style="color:#aaa;font-size:12px;padding:8px;">אין מסמכים</p>';
+function renderDocChecklist() {
+  const el = document.getElementById('doc-checklist');
+  if (!el) return;
+  if (!caseDocs.length) { el.innerHTML = '<p style="font-size:12px;color:#aaa;text-align:center;padding:8px">אין מסמכים</p>'; return; }
+  el.innerHTML = caseDocs.map((d,i) =>
+    '<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:4px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'#f0f4f8\'" onmouseout="this.style.background=\'\'">' +
+    '<input type="checkbox" id="doc-chk-' + i + '" checked style="cursor:pointer"/>' +
+    '<span style="flex:1">' + d.name + '</span>' +
+    '<span style="color:#aaa;font-size:11px">' + d.date + '</span></label>'
+  ).join('');
+}
+
+function filterSummons() {
+  summonsHidden = !summonsHidden;
+  const btn = document.getElementById('btn-filter-summons');
+  const st  = document.getElementById('summons-status');
+  if (!summonsHidden) {
+    caseDocs.forEach((_,i) => { const l=document.getElementById('doc-chk-'+i)?.closest('label'); if(l) l.style.display=''; });
+    btn.style.background='#fff3e0'; btn.style.color='#e65100'; btn.textContent='🚫 הסתר זימונים'; st.textContent='';
     return;
   }
-
-  list.innerHTML = filtered.map(d => {
-    const checked = aiSelectedDocs.has(d.docId) ? 'checked' : '';
-    const preloaded = docTexts[d.docId] ? '✓' : '';
-    const preloadColor = docTexts[d.docId] ? 'color:#4caf50' : 'color:#ccc';
-    return `<label style="display:flex;align-items:center;gap:8px;padding:5px 8px;cursor:pointer;border-bottom:1px solid #f0f2f5;font-size:12px;" onchange="aiToggleDoc('${d.docId}')">
-      <input type="checkbox" ${checked} style="accent-color:#1a3a5c;width:14px;height:14px;" />
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${d.name}</span>
-      <span style="color:#aaa;font-size:11px;white-space:nowrap;">${d.date}</span>
-      <span style="font-size:10px;${preloadColor}">${preloaded}</span>
-    </label>`;
-  }).join('');
-
-  updateAIDocCount();
+  btn.textContent='✓ הצג הכל'; btn.style.background='#e8f5e9'; btn.style.color='#2e7d32';
+  let hidden=0;
+  caseDocs.forEach((doc,i) => {
+    const label = document.getElementById('doc-chk-'+i)?.closest('label');
+    if (label) {
+      const s = isSummons(doc.name);
+      label.style.display = s ? 'none' : '';
+      if (s) { document.getElementById('doc-chk-'+i).checked=false; hidden++; }
+    }
+  });
+  st.textContent = hidden > 0 ? 'הוסתרו ' + hidden + ' זימונים' : 'לא נמצאו זימונים';
 }
 
-function aiToggleDoc(docId) {
-  if (aiSelectedDocs.has(docId)) aiSelectedDocs.delete(docId);
-  else aiSelectedDocs.add(docId);
-  updateAIDocCount();
+function toggleAllDocs(checked) {
+  caseDocs.forEach((_,i) => { const c=document.getElementById('doc-chk-'+i); if(c) c.checked=checked; });
 }
 
-function updateAIDocCount() {
-  const count = document.getElementById('ai-doc-count');
-  if (!count) return;
-  const n = aiSelectedDocs.size;
-  const warn = n > 50 ? ' — ⚠️ סיכום ייקח זמן רב' : n > 20 ? ' — עיבוד בינוני' : '';
-  count.textContent = n > 0 ? `נבחרו ${n} מסמכים מתוך ${caseDocs.length}${warn}` : 'לא נבחרו מסמכים';
-  count.style.color = n > 50 ? '#e65100' : n > 0 ? '#1a3a5c' : '#aaa';
+function getSelectedDocs() {
+  return caseDocs.filter((_,i) => { const c=document.getElementById('doc-chk-'+i); return c&&c.checked; });
 }
 
-function aiSelectRecent(n) {
-  aiSelectedDocs = new Set(caseDocs.slice(0, n).map(d => d.docId));
-  renderAIDocList();
+function addLog(msg) {
+  const log = document.getElementById('ai-log');
+  if (!log) return;
+  log.innerHTML += '<div>[' + new Date().toLocaleTimeString('he-IL') + '] ' + msg + '</div>';
+  log.scrollTop  = log.scrollHeight;
 }
 
-function aiSelectAll() {
-  if (!confirm(`בחירת כל ${caseDocs.length} המסמכים עשויה לקחת זמן רב. להמשיך?`)) return;
-  aiSelectedDocs = new Set(caseDocs.map(d => d.docId));
-  renderAIDocList();
-}
-
-function aiSelectNone() {
-  aiSelectedDocs = new Set();
-  renderAIDocList();
-}
+function clearLog() { const l=document.getElementById('ai-log'); if(l) l.innerHTML=''; }
 
 async function loadDocTexts() {
-  for (const doc of caseDocs) {
+  const sel = getSelectedDocs();
+  addLog('טוען ' + sel.length + ' מסמכים...');
+  for (const doc of sel) {
     if (!docTexts[doc.docId]) {
+      addLog('טוען: ' + doc.name);
       try {
-        const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`);
+        const r = await fetch(PROXY + '/api/doctext/' + doc.docId);
         const d = await r.json();
         docTexts[doc.docId] = d.text || '';
-      } catch { docTexts[doc.docId] = ''; }
-    }
+        addLog('✓ ' + doc.name + ' (' + docTexts[doc.docId].length + ' תווים)');
+      } catch { docTexts[doc.docId]=''; addLog('✗ שגיאה: ' + doc.name); }
+    } else { addLog('✓ ' + doc.name + ' (כבר נטען)'); }
   }
 }
 
-// ── Extract dates from question ───────────────────────────────────────────────
-function extractDatesFromQuestion(q) {
-  const dates = [];
-  // Match DD/MM/YYYY, D/M/YYYY, DD/MM/YY
-  const re = /(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/g;
-  let m;
-  while ((m = re.exec(q)) !== null) {
-    let y = m[3];
-    if (y.length === 2) y = '20' + y;
-    // Normalize to DD/MM/YYYY
-    const day   = m[1].padStart(2, '0');
-    const month = m[2].padStart(2, '0');
-    dates.push(`${day}/${month}/${y}`);
-  }
-  return dates;
-}
-
-// ── Filter docs by date or keyword ───────────────────────────────────────────
-function filterDocsForAI(q) {
-  const dates = extractDatesFromQuestion(q);
-  const MAX_DOCS = 20; // Gemini supports large context
-
-  // Check for multiple doc types mentioned
-  const docTypes = ['פרוטוקול', 'החלטה', 'כתב תביעה', 'כתב הגנה', 'תצהיר', 'חוות דעת', 'הסכם', 'פסק דין'];
-
-  // Filter by date(s) first
-  if (dates.length > 0) {
-    const filtered = caseDocs.filter(d => dates.some(dt => d.date === dt));
-    if (filtered.length > 0) {
-      // Within date filter, further filter by doc type if mentioned
-      for (const kw of docTypes) {
-        if (q.includes(kw)) {
-          const typed = filtered.filter(d => d.name.includes(kw));
-          if (typed.length > 0) {
-            return { docs: typed.slice(0, MAX_DOCS), filterDesc: `סינון: תאריך ${dates.join(', ')} + סוג "${kw}" — ${typed.length} מסמך/ים` };
-          }
-        }
-      }
-      return { docs: filtered.slice(0, MAX_DOCS), filterDesc: `סינון לפי תאריך: ${dates.join(', ')} — ${filtered.length} מסמך/ים` };
-    }
-    return { docs: [], filterDesc: `⚠️ לא נמצאו מסמכים בתאריך ${dates.join(', ')}` };
-  }
-
-  // No date — check for doc type keywords
-  const matchedTypes = [];
-  for (const kw of docTypes) {
-    if (q.includes(kw)) {
-      const filtered = caseDocs.filter(d => d.name.includes(kw));
-      matchedTypes.push(...filtered);
-    }
-  }
-  if (matchedTypes.length > 0) {
-    const unique = [...new Map(matchedTypes.map(d => [d.docId, d])).values()];
-    return { docs: unique.slice(0, MAX_DOCS), filterDesc: `סינון לפי סוג מסמך — ${unique.length} מסמך/ים` };
-  }
-
-  // Check for "כל התיק" or "סכם הכל"
-  if (q.includes('כל התיק') || q.includes('סכם הכל') || q.includes('כל המסמכים')) {
-    return { docs: caseDocs.slice(0, MAX_DOCS), filterDesc: `כל התיק — ${Math.min(caseDocs.length, MAX_DOCS)} מסמכים (מתוך ${caseDocs.length})` };
-  }
-
-  // Default — most recent docs
-  const recent = [...caseDocs].slice(0, 10);
-  return {
-    docs: recent,
-    filterDesc: caseDocs.length > 10
-      ? `⚠️ ${caseDocs.length} מסמכים בתיק — טוען 10 האחרונים. ציין תאריך, סוג, או "כל התיק" לשליטה מדויקת.`
-      : `${caseDocs.length} מסמכים בתיק`
-  };
-}
-
-// ── Stop AI ───────────────────────────────────────────────────────────────────
-function stopAI() {
-  if (aiAbortController) {
-    aiAbortController.abort();
-    aiAbortController = null;
-  }
-  const ans = document.getElementById('ai-ans');
-  if (ans) {
-    const current = ans.textContent.replace('', '');
-    ans.textContent = current ? current + '\\n\\n[הופסק על ידי המשתמש]' : '[הופסק]';
-  }
-  document.getElementById('ai-ask-btn').style.display = '';
-  document.getElementById('ai-stop-btn').style.display = 'none';
-}
-
-async function askAI() {
-  const q = document.getElementById('ai-q').value.trim();
-  if (!q) return;
-
-  const ans = document.getElementById('ai-ans');
-  const askBtn  = document.getElementById('ai-ask-btn');
-  const stopBtn = document.getElementById('ai-stop-btn');
-  const filterInfo = document.getElementById('ai-filter-info');
-  const progressWrap = document.getElementById('ai-progress-wrap');
-  const progressBar  = document.getElementById('ai-progress-bar');
-  const progressText = document.getElementById('ai-progress-text');
-
-  // Use manually selected docs, fall back to smart filter if none selected
-  let docsToUse, filterDesc;
-  if (aiSelectedDocs && aiSelectedDocs.size > 0) {
-    docsToUse  = caseDocs.filter(d => aiSelectedDocs.has(d.docId));
-    filterDesc = `נבחרו ידנית ${docsToUse.length} מסמכים`;
-  } else {
-    const result = filterDocsForAI(q);
-    docsToUse  = result.docs;
-    filterDesc = result.filterDesc;
-  }
-
-  filterInfo.textContent = filterDesc;
-  filterInfo.style.display = 'block';
-
-  if (docsToUse.length === 0) {
-    ans.className = 'ai-box';
-    ans.style.color = '#c62828';
-    ans.textContent = 'לא נבחרו מסמכים — בחר מסמכים מהרשימה למעלה';
-    return;
-  }
-
-  askBtn.style.display = 'none';
-  stopBtn.style.display = '';
-  stopBtn.disabled = false;
-
-  progressWrap.style.display = 'block';
-  progressBar.style.width = '0%';
-  ans.className = 'ai-box loading';
-  ans.textContent = '';
-
-  const toLoad = docsToUse.filter(d => !docTexts[d.docId]);
-  const totalToLoad = toLoad.length;
-  let loaded = 0;
-
-  for (const doc of docsToUse) {
-    if (!docTexts[doc.docId]) {
-      try {
-        loaded++;
-        const pct = Math.round((loaded / Math.max(totalToLoad, 1)) * 80);
-        progressBar.style.width = pct + '%';
-        progressText.textContent = `טוען מסמך ${loaded} מתוך ${totalToLoad}: ${doc.name}`;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
-        try {
-          const r = await fetch(`${PROXY}/api/doctext/${doc.docId}`, { signal: controller.signal });
-          clearTimeout(timeoutId);
-          const d = await r.json();
-          docTexts[doc.docId] = d.text || '';
-        } catch {
-          clearTimeout(timeoutId);
-          docTexts[doc.docId] = '';
-        }
-      } catch { docTexts[doc.docId] = ''; }
-    }
-  }
-
-  progressBar.style.width = '95%';
-  progressText.textContent = '';
-
-  const combined = docsToUse
-    .map(d => `[${d.name} | ${d.date}]:\\n${(docTexts[d.docId]||'')}`)
-    .join('\\n\\n');
-
-  try {
-    await streamAI(
-      'אתה עוזר משפטי לבית הדין הרבני. ענה בעברית בלבד. ענה על בסיס המסמכים שסופקו לך בלבד. חשוב מאוד: שם הקובץ אינו רלוונטי — גם אם המסמך נקרא "כריכה" או כל שם אחר, הוא עשוי להכיל פרוטוקול דיון, החלטה, עדות או כל תוכן משפטי אחר. סכם את התוכן בפועל של המסמך ללא קשר לשמו. כתוב טקסט רציף ונקי ללא סימני markdown, ללא כוכביות, ללא hashtag, ללא מקפים כסמני רשימה. השתמש במספור רגיל (1. 2. 3.) לרשימות. הפרד בין פסקאות בשורה ריקה בלבד.',
-      `מסמכי תיק:\\n\\n${combined}\\n\\n---\\nשאלה: ${q}`,
-      ans
-    );
-  } catch(e) {
-    if (e.name === 'AbortError') {
-      // Already handled in stopAI
-    } else {
-      ans.className = 'ai-box';
-      ans.textContent = 'שגיאה: ' + e.message;
-    }
-  } finally {
-    askBtn.style.display = '';
-    stopBtn.style.display = 'none';
-    aiAbortController = null;
-    // Hide progress bar
-    const pw = document.getElementById('ai-progress-wrap');
-    const pb = document.getElementById('ai-progress-bar');
-    if (pw) {
-      pb.style.width = '100%';
-      setTimeout(() => { pw.style.display = 'none'; pb.style.width = '0%'; }, 600);
-    }
-  }
-}
-// ── Streaming AI call ─────────────────────────────────────────────────────────
 async function streamAI(system, userMessage, targetEl) {
   targetEl.className = 'ai-box';
   targetEl.innerHTML = '<span class="ai-cursor"></span>';
-
-  aiAbortController = new AbortController();
-
-  const resp = await fetch(`${PROXY}/api/ai`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ system, messages: [{ role: 'user', content: userMessage }] }),
-    signal: aiAbortController.signal
+  const resp = await fetch(PROXY + '/api/ai', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({system, messages:[{role:'user',content:userMessage}]})
   });
-
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
   const reader  = resp.body.getReader();
   const decoder = new TextDecoder();
   let text = '';
-
   while (true) {
-    const { done, value } = await reader.read();
+    const {done,value} = await reader.read();
     if (done) break;
-    const lines = decoder.decode(value, { stream: true }).split('\\n');
+    const raw   = decoder.decode(value, {stream:true});
+    const lines = raw.split('\n');
     for (const line of lines) {
       if (!line.startsWith('data:')) continue;
-      const raw = line.slice(5).trim();
-      if (!raw || raw === '[DONE]') continue;
+      const s = line.slice(5).trim();
+      if (!s || s === '[DONE]') continue;
       try {
-        const chunk = JSON.parse(raw);
+        const chunk = JSON.parse(s);
         if (chunk.error) throw new Error(chunk.error);
         if (chunk.text) {
           text += chunk.text;
@@ -1236,116 +1277,85 @@ async function streamAI(system, userMessage, targetEl) {
         }
         if (chunk.usage) {
           const u = chunk.usage;
-          const costEl = targetEl.parentElement.querySelector('.ai-cost');
-          if (costEl) {
-            costEl.textContent = `טוקנים: ${u.total.toLocaleString()} | עלות: $${u.usd} (~₪${u.ils})`;
-          }
+          const costEl = document.getElementById('ai-cost');
+          if (costEl && devMode) costEl.textContent = 'טוקנים: ' + u.total.toLocaleString() + ' | $' + u.usd + ' / ₪' + u.ils;
+          addLog('טוקנים: ' + u.total.toLocaleString() + ' | $' + u.usd);
         }
-        if (chunk.done) break;
-      } catch(e) { /* skip malformed chunks */ }
+      } catch(e) { console.log('chunk err', e); }
     }
   }
-
-  // Final render without cursor
   targetEl.style.color = '#222';
   targetEl.style.fontStyle = 'normal';
   targetEl.textContent = text || 'לא ניתן לענות';
-
-  // Save to sessionStorage keyed by case number
   if (selectedCase) {
-    const caseKey = `ai_${selectedCase.fullFileMainNumber || selectedCase.fileNumber}`;
-    try { sessionStorage.setItem(caseKey, text); } catch(e) {}
+    const ck = 'ai_' + (selectedCase.fullFileMainNumber || selectedCase.fileNumber);
+    try { sessionStorage.setItem(ck, text); } catch(e) {}
   }
-
   return text;
 }
 
-function clearAIAnswer(caseKey) {
+function clearAI(caseKey) {
   sessionStorage.removeItem(caseKey);
   const ans = document.getElementById('ai-ans');
-  if (ans) {
-    ans.style.color = '#aaa';
-    ans.style.fontStyle = 'italic';
-    ans.textContent = 'התשובה תופיע כאן...';
-  }
-  const cost = document.querySelector('.ai-cost');
-  if (cost) cost.textContent = '';
+  if (ans) { ans.style.color='#aaa'; ans.style.fontStyle='italic'; ans.textContent='התשובה תופיע כאן...'; }
 }
 
 async function exportDocx() {
   const ans = document.getElementById('ai-ans');
-  if (!ans || !ans.textContent || ans.textContent === 'התשובה תופיע כאן...') {
-    alert('אין תשובה לייצוא — הפעל שאילתת AI תחילה.');
-    return;
-  }
+  if (!ans || !ans.textContent || ans.textContent === 'התשובה תופיע כאן...') { alert('אין תשובה לייצוא'); return; }
   try {
-    const resp = await fetch(`${PROXY}/api/export-docx`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text:        ans.textContent,
-        caseNumber:  selectedCase?.fullFileMainNumber || selectedCase?.fileNumber || '',
-        caseTitle:   `${selectedCase?.sideA || ''} נגד ${selectedCase?.sideB || ''}`,
-        courtName:   userCourtName || 'בית הדין הרבני'
-      })
+    const resp = await fetch(PROXY + '/api/export-docx', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:ans.textContent, caseNumber:selectedCase?.fullFileMainNumber||selectedCase?.fileNumber||'', caseTitle:(selectedCase?.sideA||'')+' נגד '+(selectedCase?.sideB||''), courtName:userCourtName||'בית הדין הרבני'})
     });
-    if (!resp.ok) { alert('שגיאה בייצוא המסמך'); return; }
+    if (!resp.ok) { alert('שגיאה בייצוא'); return; }
     const blob = await resp.blob();
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     const cd   = resp.headers.get('Content-Disposition') || '';
-    const match = cd.match(/filename\\*?=(?:UTF-8'')?([^;]+)/i);
-    a.download = match ? decodeURIComponent(match[1]) : 'סיכום_AI.docx';
-    a.href = url;
-    a.click();
-    URL.revokeObjectURL(url);
-  } catch(e) {
-    alert('שגיאה: ' + e.message);
-  }
+    const m    = cd.match(/filename[*]?=(?:UTF-8'')?([^;]+)/i);
+    a.download = m ? decodeURIComponent(m[1]) : 'סיכום_AI.docx';
+    a.href = url; a.click(); URL.revokeObjectURL(url);
+  } catch(e) { alert('שגיאה: ' + e.message); }
 }
 
 async function askAI() {
   const q = document.getElementById('ai-q').value.trim();
   if (!q) return;
-
+  const selected = getSelectedDocs();
+  if (!selected.length) { alert('נא לבחור לפחות מסמך אחד'); return; }
   const ans = document.getElementById('ai-ans');
-  ans.className = 'ai-box loading';
-  ans.textContent = 'טוען מסמכים...';
-
-  // Load doc texts if not already loaded
+  ans.className='ai-box'; ans.style.color='#999'; ans.style.fontStyle='italic'; ans.textContent='טוען מסמכים...';
+  addLog('--- שאילתה חדשה ---');
+  addLog('שאלה: ' + q);
+  addLog('מסמכים: ' + selected.length);
   await loadDocTexts();
-
-  const combined = caseDocs
-    .map(d => `[${d.name}]:\\n${(docTexts[d.docId]||'').substring(0,30000)}`)
-    .join('\\n\\n');
-  const context = combined || `תיק ${selectedCase.subjectSubName}`;
+  const MAX_DOC = 30000, MAX_TOT = 200000;
+  const combined = selected
+    .map(d => '[' + d.name + ']:\n' + (docTexts[d.docId]||'').substring(0, MAX_DOC))
+    .join('\n\n')
+    .substring(0, MAX_TOT);
+  addLog('טקסט: ' + combined.length + ' תווים');
+  addLog('שולח ל-Gemini...');
+  const ctx = combined || 'תיק ' + selectedCase.subjectSubName;
+  const styleEx = (document.getElementById('style-example')?.value || '').trim();
+  const sysPrompt = styleEx
+    ? 'אתה עוזר משפטי לבית הדין הרבני. ענה בעברית בלבד. ענה על בסיס המסמכים בלבד. ללא markdown ללא כוכביות.\n\nחשוב מאוד: כתוב בדיוק באותו סגנון, מבנה ורווחים כמו הדוגמה הבאה. השאר שורות ריקות בין פסקאות. כל נושא בפסקה נפרדת. פרט ככל האפשר.\n\nדוגמה לסגנון הנדרש:\n---\n' + styleEx + '\n---'
+    : 'אתה עוזר משפטי לבית הדין הרבני. ענה בעברית בלבד. ענה על בסיס המסמכים בלבד. ללא markdown ללא כוכביות. השאר שורה ריקה בין כל פסקה. פרט ככל האפשר.';
   try {
     await streamAI(
-      'אתה עוזר משפטי לבית הדין הרבני. ענה בעברית בלבד. ענה על בסיס המסמכים בלבד. כתוב טקסט רציף ונקי ללא סימני markdown, ללא כוכביות, ללא hashtag, ללא מקפים כסמני רשימה. השתמש במספור רגיל (1. 2. 3.) לרשימות. הפרד בין פסקאות בשורה ריקה בלבד.',
-      `מסמכי תיק:\\n\\n${context}\\n\\n---\\nשאלה: ${q}`,
+      sysPrompt,
+      'מסמכי תיק:\n\n' + ctx + '\n\n---\nשאלה: ' + q,
       ans
     );
+    addLog('✓ תשובה התקבלה');
   } catch(e) {
-    ans.className = 'ai-box';
-    ans.textContent = 'שגיאה: ' + e.message;
+    ans.className='ai-box'; ans.textContent='שגיאה: ' + e.message;
+    addLog('✗ שגיאה: ' + e.message);
   }
 }
 
-// ── Keyboard shortcuts ────────────────────────────────────────────────────────
-document.addEventListener('keydown', e => {
-  if (e.key === 'Enter') {
-    const id = document.activeElement.id;
-    if (id === 'id-input')   doSearch();
-    if (id === 'case-input') doCaseSearch();
-    if (id === 'name-last' || id === 'name-first') doNameSearch();
-    if (id === 'content-q')     doContentSearch();
-    if (id === 'content-q-all') doContentSearchAll();
-    if (id === 'search-all-q')  doSearchAllCases();
-    if (id === 'ai-q')          askAI();
-  }
-});
-
-// ── Usage stats (dev mode only) ───────────────────────────────────────────────
 async function showUsage() {
   const popup   = document.getElementById('usage-popup');
   const content = document.getElementById('usage-content');
@@ -1353,766 +1363,42 @@ async function showUsage() {
   if (popup.style.display === 'none') return;
   content.textContent = 'טוען...';
   try {
-    const r = await fetch(`${PROXY}/api/usage`);
+    const r = await fetch(PROXY + '/api/usage');
     const d = await r.json();
     if (d.error) { content.textContent = 'שגיאה: ' + d.error; return; }
-    content.innerHTML = `
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
-        <div style="background:#f8f9fb;border-radius:8px;padding:10px;text-align:center;">
-          <div style="font-size:20px;font-weight:600;color:#1a3a5c;">${d.queries}</div>
-          <div style="font-size:11px;color:#888;">שאילתות</div>
-        </div>
-        <div style="background:#f8f9fb;border-radius:8px;padding:10px;text-align:center;">
-          <div style="font-size:20px;font-weight:600;color:#1a3a5c;">${d.total_tokens.toLocaleString()}</div>
-          <div style="font-size:11px;color:#888;">סה"כ טוקנים</div>
-        </div>
-        <div style="background:#e8f5e9;border-radius:8px;padding:10px;text-align:center;">
-          <div style="font-size:20px;font-weight:600;color:#2e7d32;">$${d.total_usd}</div>
-          <div style="font-size:11px;color:#888;">סה"כ עלות</div>
-        </div>
-        <div style="background:#e8f5e9;border-radius:8px;padding:10px;text-align:center;">
-          <div style="font-size:20px;font-weight:600;color:#2e7d32;">₪${d.total_ils}</div>
-          <div style="font-size:11px;color:#888;">בשקלים</div>
-        </div>
-      </div>
-      <div style="font-size:11px;color:#888;">ממוצע לשאילתה: $${d.avg_usd}</div>
-      ${d.last_queries.length ? `
-        <div style="margin-top:12px;font-size:11px;color:#888;border-top:1px solid #f0f2f5;padding-top:10px;">10 שאילתות אחרונות:</div>
-        ${d.last_queries.slice().reverse().map(q =>
-          `<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 0;border-bottom:1px solid #f8f9fb;">
-            <span style="color:#666;">${q.ts.replace('T',' ')}</span>
-            <span style="color:#888;">${q.total.toLocaleString()} טוקנים</span>
-            <span style="color:#2e7d32;">$${q.usd} / ₪${q.ils}</span>
-          </div>`
-        ).join('')}
-      ` : ''}
-    `;
-  } catch(e) {
-    content.textContent = 'שגיאה בטעינת נתונים';
-  }
+    content.innerHTML =
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">' +
+      '<div style="background:#f8f9fb;border-radius:8px;padding:10px;text-align:center"><div style="font-size:20px;font-weight:600;color:#1a3a5c">' + d.queries + '</div><div style="font-size:11px;color:#888">שאילתות</div></div>' +
+      '<div style="background:#f8f9fb;border-radius:8px;padding:10px;text-align:center"><div style="font-size:20px;font-weight:600;color:#1a3a5c">' + d.total_tokens.toLocaleString() + '</div><div style="font-size:11px;color:#888">טוקנים</div></div>' +
+      '<div style="background:#e8f5e9;border-radius:8px;padding:10px;text-align:center"><div style="font-size:20px;font-weight:600;color:#2e7d32">$' + d.total_usd + '</div><div style="font-size:11px;color:#888">עלות</div></div>' +
+      '<div style="background:#e8f5e9;border-radius:8px;padding:10px;text-align:center"><div style="font-size:20px;font-weight:600;color:#2e7d32">&#8362;' + d.total_ils + '</div><div style="font-size:11px;color:#888">שקלים</div></div>' +
+      '</div><div style="font-size:11px;color:#888">ממוצע: $' + d.avg_usd + '</div>';
+  } catch(e) { content.textContent = 'שגיאה'; }
 }
 
-// ── Start ─────────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const id = document.activeElement.id;
+  if (id === 'id-input')    doSearch();
+  if (id === 'case-input')  doCaseSearch();
+  if (id === 'name-last' || id === 'name-first') doNameSearch();
+  if (id === 'content-q')   doContentSearch();
+  if (id === 'ai-q')        askAI();
+});
+
 boot();
-</script>
-</body>
-</html>
 """
 
 
-
-
-SHIRA = "http://shira2"
-SPFE  = "http://prod-spfe:1000"
-PROXY = "http://192.168.174.80:8080"
-
-# ↓↓↓ PUT YOUR GEMINI API KEY HERE — ONLY HERE ↓↓↓
-GEMINI_API_KEY = "AIzaSyCgutrB9sRoyQHC5mY11LiHWF505VQVD44"
-# ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
-
-def make_session():
-    s = requests.Session()
-    s.auth = HttpNegotiateAuth()
-    s.headers.update({
-        "Content-Type": "application/json; charset=UTF-8",
-        "Origin": SHIRA,
-        "Referer": f"{SHIRA}/App/main/files/files-list"
-    })
-    s.proxies = {"http": None, "https": None}
-    return s
-
-SESSION = make_session()
-
-
-@app.route("/")
-def index():
-    return Response(_HTML, mimetype="text/html; charset=utf-8")
-
-@app.route("/api/me")
-def me():
-    court_names = {
-        1: "ירושלים", 2: "תל אביב", 3: "חיפה", 4: "פתח תקוה",
-        5: "רחובות",  6: "באר שבע", 7: "טבריה", 8: "צפת",
-        9: "אשדוד",  10: "אשקלון", 11: "נתניה",
-        12: "בית הדין הגדול", 13: "אריאל"
-    }
-    try:
-        r = SESSION.get(
-            f"{SHIRA}/api/api/userController/GetUser",
-            timeout=10
-        )
-        r.raise_for_status()
-        data = r.json()
-        user_id    = data.get("userId")
-        user_name  = data.get("userName")
-        first_name = data.get("firstName", "")
-        last_name  = data.get("lastName", "")
-        court_list = data.get("courtList", [])
-        if court_list:
-            court_id   = court_list[0]["courtId"]
-            court_name = court_list[0].get("courtName") or court_names.get(court_id, str(court_id))
-            print(f"[me] user={user_name} court={court_id} ({court_name})")
-            return jsonify({
-                "courtId":   court_id,
-                "courtName": court_name,
-                "userId":    user_id,
-                "userName":  user_name,
-                "firstName": first_name,
-                "lastName":  last_name
-            })
-        return jsonify({"error": "no court found for this user"}), 500
-    except Exception as e:
-        print(f"[me] exception: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/search", methods=["POST"])
-def search():
-    body = request.json
-    id_num = body.get("idNum", "").strip()
-    if not id_num:
-        return jsonify({"error": "idNum required"}), 400
-    payload = {
-        "courtID": None, "assemblyId": None, "fileNumber": None,
-        "fileMainID": None, "subjectID": None, "subjectSubID": None,
-        "Composition": None, "FileStatusOpen": "-1",
-        "FirstName": None, "IdNum1": id_num, "IdType1": 1,
-        "IsOnlineFile": False, "LastName": None, "OldFileNum": "",
-        "currentPage": 1, "fileStatusID": None,
-        "insertDateFrom": None, "insertDateTo": None,
-        "isCorrectName": False, "isPriority": False,
-        "meetingDateFrom": None, "meetingDateTo": None,
-        "rowsPerPage": 100
-    }
-    try:
-        resp = SESSION.post(f"{SHIRA}/api/api/FileSearch/GetAdvancedFileSearch", json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        for f in data:
-            f["sideB"] = f.get("sideB") or ""
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/search-case", methods=["POST"])
-def search_case():
-    body = request.json
-    file_main_id = body.get("fileMainId", "").strip()
-    file_number  = body.get("fileNumber")
-    if not file_main_id:
-        return jsonify({"error": "fileMainId required"}), 400
-    payload = {
-        "courtID": None, "assemblyId": None,
-        "fileNumber": int(file_number) if file_number else None,
-        "fileMainID": int(file_main_id),
-        "subjectID": None, "subjectSubID": None,
-        "Composition": None, "FileStatusOpen": "-1",
-        "FirstName": None, "IdNum1": None, "IdType1": 1,
-        "IsOnlineFile": False, "LastName": None, "OldFileNum": "",
-        "currentPage": 1, "fileStatusID": None,
-        "insertDateFrom": None, "insertDateTo": None,
-        "isCorrectName": False, "isPriority": False,
-        "meetingDateFrom": None, "meetingDateTo": None,
-        "rowsPerPage": 100
-    }
-    try:
-        resp = SESSION.post(f"{SHIRA}/api/api/FileSearch/GetAdvancedFileSearch", json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        for f in data:
-            f["sideB"] = f.get("sideB") or ""
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/search-name", methods=["POST"])
-def search_name():
-    body       = request.json
-    last_name  = body.get("lastName", "").strip()
-    first_name = body.get("firstName", "").strip()
-    if not last_name and not first_name:
-        return jsonify({"error": "lastName or firstName required"}), 400
-    payload = {
-        "courtID": None, "assemblyId": None, "fileNumber": None,
-        "fileMainID": None, "subjectID": None, "subjectSubID": None,
-        "Composition": None, "FileStatusOpen": "-1",
-        "FirstName": first_name or None,
-        "LastName":  last_name  or None,
-        "IdNum1": None, "IdType1": 1,
-        "IsOnlineFile": False, "OldFileNum": "",
-        "currentPage": 1, "fileStatusID": None,
-        "insertDateFrom": None, "insertDateTo": None,
-        "isCorrectName": False, "isPriority": False,
-        "meetingDateFrom": None, "meetingDateTo": None,
-        "rowsPerPage": 100
-    }
-    try:
-        resp = SESSION.post(f"{SHIRA}/api/api/FileSearch/GetAdvancedFileSearch", json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        for f in data:
-            f["sideB"] = f.get("sideB") or ""
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-
-def documents(file_id):
-    url = f"{SHIRA}/classic/Forms/File/Contents/FileDocs.aspx?userid=0&courtid=0&FileID={file_id}&EntityId={file_id}&EntityTypeId=6"
-    try:
-        resp = SESSION.get(url, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-        docs = []
-        table = soup.find("table", id="grdFileDocs")
-        if not table:
-            for t in soup.find_all("table"):
-                if "OpenDocument" in str(t):
-                    table = t
-                    break
-        if table:
-            for tr in table.find_all("tr"):
-                row_html = str(tr)
-                doc_id_match = re.search(r"OpenDocument\((\d+)\)", row_html)
-                if not doc_id_match:
-                    continue
-                doc_id = doc_id_match.group(1)
-                link = tr.find("a", href=re.compile(r"OpenDocument")) or tr.find("a", onclick=True)
-                name = link.get_text(strip=True) if link else f"מסמך {doc_id}"
-                if not name:
-                    name = f"מסמך {doc_id}"
-                row_text = tr.get_text(" ", strip=True)
-                date_match = re.search(r"\d{2}/\d{2}/\d{4}", row_text)
-                date = date_match.group(0) if date_match else ""
-                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-                docs.append({
-                    "docId": doc_id, "name": name, "date": date,
-                    "type": "pdf" if ext == "pdf" else "docx",
-                    "openUrl": f"{SHIRA}/classic/Forms/Documents/DM/DMOpenDocument.aspx?DocIDs={doc_id}&Action=1"
-                })
-        return jsonify(docs)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/documents/<int:file_id>", methods=["GET"])
-def documents(file_id):
-    url = f"{SHIRA}/classic/Forms/File/Contents/FileDocs.aspx?userid=0&courtid=0&FileID={file_id}&EntityId={file_id}&EntityTypeId=6"
-    try:
-        resp = SESSION.get(url, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-        docs = []
-        table = soup.find("table", id="grdFileDocs")
-        if not table:
-            for t in soup.find_all("table"):
-                if "OpenDocument" in str(t):
-                    table = t
-                    break
-        if table:
-            for tr in table.find_all("tr"):
-                row_html = str(tr)
-                doc_id_match = re.search(r"OpenDocument\((\d+)\)", row_html)
-                if not doc_id_match:
-                    continue
-                doc_id = doc_id_match.group(1)
-                link = tr.find("a", href=re.compile(r"OpenDocument")) or tr.find("a", onclick=True)
-                name = link.get_text(strip=True) if link else f"מסמך {doc_id}"
-                if not name:
-                    name = f"מסמך {doc_id}"
-                row_text = tr.get_text(" ", strip=True)
-                date_match = re.search(r"\d{2}/\d{2}/\d{4}", row_text)
-                date = date_match.group(0) if date_match else ""
-                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-                docs.append({
-                    "docId": doc_id, "name": name, "date": date,
-                    "type": "pdf" if ext == "pdf" else "docx",
-                    "openUrl": f"{SHIRA}/classic/Forms/Documents/DM/DMOpenDocument.aspx?DocIDs={doc_id}&Action=1"
-                })
-        return jsonify(docs)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/doctext/<doc_id>", methods=["GET"])
-def doc_text(doc_id):
-    try:
-        xml = f"<XmlData><DocumentID>{doc_id}</DocumentID></XmlData>"
-        r1 = SESSION.post(f"{SHIRA}/classic/WS/App/WsShiraUtils.asmx/GetDocumentDetails",
-                          data=xml.encode("utf-8"), headers={"Content-Type": "application/xml"}, timeout=10)
-        root1 = ET.fromstring(r1.text)
-        doc_number_el = root1.find("DocNumber")
-        if doc_number_el is None or not doc_number_el.text:
-            return jsonify({"text": "", "error": "DocNumber not found"})
-        doc_number = doc_number_el.text.strip()
-        r2 = SESSION.post(f"{SPFE}/ShiraDocsMngWS.asmx/GetDocumentUrlAndStatus",
-                          data=f"{{'docNumber':'{doc_number}', 'isCopy':'true'}}",
-                          headers={"Content-Type": "application/json"}, timeout=10)
-        result = r2.json().get("d", "")
-        file_url = result.split("|")[0] if "|" in result else result
-        if not file_url or file_url == "-1":
-            return jsonify({"text": "", "error": "file URL not found"})
-        r3 = SESSION.get(file_url, timeout=20)
-        r3.raise_for_status()
-        file_bytes = io.BytesIO(r3.content)
-        ext = file_url.rsplit(".", 1)[-1].lower()
-        text = ""
-        if ext == "pdf":
-            with pdfplumber.open(file_bytes) as pdf:
-                text = "\n".join(p.extract_text() or "" for p in pdf.pages)
-        elif ext in ("docx", "doc"):
-            d = docx.Document(file_bytes)
-            text = "\n".join(p.text for p in d.paragraphs)
-        else:
-            text = r3.content.decode("utf-8", errors="ignore")[:50000]
-        return jsonify({"text": text[:30000], "url": file_url})
-    except Exception as e:
-        return jsonify({"text": "", "error": str(e)})
-
-
-@app.route("/api/hearings/<int:file_id>", methods=["GET"])
-def hearings(file_id):
-    url = f"{SHIRA}/classic/Forms/File/Contents/FileMeetings.aspx?userid=0&courtid=0&FileID={file_id}&EntityId={file_id}&EntityTypeId=6"
-    try:
-        resp = SESSION.get(url, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-        table = soup.find("table", id="grdMeetings") or soup.find("table")
-        if not table:
-            return jsonify([])
-        rows = []
-        for tr in table.find_all("tr")[1:]:
-            cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-            if len(cells) >= 4 and cells[2]:
-                rows.append({
-                    "meetingId": cells[0], "hebrewDate": cells[1],
-                    "date": cells[2], "type": cells[3],
-                    "timeFrom": cells[4] if len(cells) > 4 else "",
-                    "timeTo": cells[5] if len(cells) > 5 else "",
-                    "panel": cells[6] if len(cells) > 6 else "",
-                    "status": cells[7] if len(cells) > 7 else "",
-                })
-        return jsonify(rows)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-def anonymize_text(text):
-    """
-    Remove PII before sending to external AI.
-    Removes: ID numbers, phones, emails, bank accounts, addresses, names.
-    """
-    import re
-
-    # Israeli ID numbers (9 digits)
-    text = re.sub(r'\b\d{9}\b', '[ת"ז]', text)
-
-    # Phone numbers
-    text = re.sub(r'\b0\d{1,2}[-\s]?\d{3}[-\s]?\d{4}\b', '[טלפון]', text)
-
-    # Email addresses
-    text = re.sub(r'[\w.+\-]+@[\w\-]+\.\w+', '[מייל]', text)
-
-    # Bank accounts near keywords
-    text = re.sub(r'(?:חשבון|ח-ן)[^\d]{0,10}(\d{5,12})',
-                  lambda m: m.group(0).replace(m.group(1), '[חשבון]'), text)
-
-    # Addresses
-    text = re.sub(r'(?:רח\'|רחוב|שד\'|שדרות|סמטת|ככר)\s+[\u05d0-\u05ea\s"\']{2,30}\s+\d{1,4}',
-                  '[כתובת]', text)
-
-    # Zip codes (7 digits)
-    text = re.sub(r'\b\d{7}\b', '[מיקוד]', text)
-
-    # Passport numbers
-    text = re.sub(r'\b[A-Z]{1,2}\d{6,8}\b', '[דרכון]', text)
-
-    # Names after "האיש" / "האישה"
-    text = re.sub(
-        r'(?:האיש|האישה)\s+([\u05d0-\u05ea]{2,10}\s+[\u05d0-\u05ea]{2,10})',
-        lambda m: m.group(0).replace(m.group(1), '[שם]'), text)
-
-    # Names after legal titles (attorney, judge, dayan)
-    text = re.sub(
-        r'(?:עו"ד|עורך דין|עורכת דין|השופט|השופטת|הדיין|הרב)\s+'
-        r'([\u05d0-\u05ea]{2,10}(?:\s+[\u05d0-\u05ea]{2,10}){1,2})',
-        lambda m: m.group(0).replace(m.group(1), '[שם]'), text)
-
-    # Names after party roles: תובע, נתבע etc.
-    text = re.sub(
-        r'(?:התובע|התובעת|הנתבע|הנתבעת|המבקש|המבקשת|המשיב|המשיבה),?\s+'
-        r'([\u05d0-\u05ea]{2,10}\s+[\u05d0-\u05ea]{2,10})',
-        lambda m: m.group(0).replace(m.group(1), '[שם]'), text)
-
-    return text
-
-@app.route("/api/ai-test")
-def ai_test():
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-        print(f"[ai-test] calling Gemini...")
-        resp = requests.post(
-            url,
-            json={"contents": [{"parts": [{"text": "say hello in Hebrew"}]}]},
-            proxies={"https": None, "http": None},
-            verify=False,
-            timeout=60
-        )
-        print(f"[ai-test] status={resp.status_code}")
-        print(f"[ai-test] raw={resp.text[:300]}")
-        return jsonify({"status": resp.status_code, "raw": resp.text[:500]})
-    except Exception as e:
-        print(f"[ai-test] exception: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/ai", methods=["POST"])
-def ai_proxy():
-    """
-    Streaming endpoint — returns Server-Sent Events.
-    The frontend should read chunks as they arrive instead of waiting for the full response.
-    """
-    body = request.json
-    user_message = body.get("messages", [{}])[0].get("content", "")
-    system = body.get("system", "אתה עוזר משפטי לבית הדין הרבני. ענה בעברית בלבד. כתוב טקסט רציף ונקי ללא סימני markdown, ללא כוכביות, ללא hashtag, ללא מקפים כסמני רשימה. השתמש במספור רגיל (1. 2. 3.) לרשימות. הפרד בין פסקאות בשורה ריקה בלבד.")
-
-    # Safety cap — Gemini 2.5 Flash supports ~1M tokens but keep requests reasonable
-    user_message = user_message[:200000]
-
-    print(f"[ai] raw message length BEFORE anonymize={len(user_message)}")
-    print(f"[ai] first 500 chars: {repr(user_message[:500])}")
-
-    # Anonymize PII before sending to external AI
-    user_message = anonymize_text(user_message)
-
-    # Force Hebrew response — appended after anonymization so it's not stripped
-    user_message = user_message + "\n\n[הוראה חובה: ענה תמיד בעברית בלבד, ללא יוצא מן הכלל]"
-    print(f"[ai] message anonymized and ready, length={len(user_message)}")
-
-    stream_url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
-    )
-
-    print(f"[ai] streaming to Gemini, message length={len(user_message)}")
-
-    @stream_with_context
-    def generate():
-        try:
-            with requests.post(
-                stream_url,
-                json={
-                    "contents": [{"parts": [{"text": user_message}]}],
-                    "systemInstruction": {"parts": [{"text": system}]}
-                },
-                proxies={"https": None, "http": None},
-                verify=False,
-                timeout=180,   # 3 minutes — enough for very large docs
-                stream=True
-            ) as resp:
-                print(f"[ai] gemini stream status={resp.status_code}")
-                for raw_line in resp.iter_lines():
-                    if not raw_line:
-                        continue
-                    # SSE lines look like: b"data: {...json...}"
-                    if isinstance(raw_line, bytes):
-                        raw_line = raw_line.decode("utf-8")
-                    if not raw_line.startswith("data:"):
-                        continue
-                    chunk_str = raw_line[5:].strip()
-                    if chunk_str == "[DONE]":
-                        break
-                    try:
-                        chunk_data = json.loads(chunk_str)
-                        # Extract text from the chunk
-                        parts = (
-                            chunk_data.get("candidates", [{}])[0]
-                            .get("content", {})
-                            .get("parts", [])
-                        )
-                        for part in parts:
-                            text_piece = part.get("text", "")
-                            if text_piece:
-                                # Strip markdown symbols
-                                text_piece = text_piece.replace("**", "").replace("__", "")
-                                text_piece = text_piece.replace("*", "").replace("_", "")
-                                text_piece = text_piece.replace("##", "").replace("###", "").replace("#", "")
-                                # Send as SSE event to the frontend
-                                yield f"data: {json.dumps({'text': text_piece}, ensure_ascii=False)}\n\n"
-
-                        # Log token usage when it appears (last chunk)
-                        usage = chunk_data.get("usageMetadata")
-                        if usage:
-                            input_tokens    = usage.get("promptTokenCount", 0)
-                            output_tokens   = usage.get("candidatesTokenCount", 0)
-                            thinking_tokens = usage.get("thoughtsTokenCount", 0)
-                            total_tokens    = usage.get("totalTokenCount", 0)
-
-                            # Gemini 2.5 Flash pricing (USD per 1M tokens)
-                            PRICE_INPUT    = 0.15
-                            PRICE_OUTPUT   = 0.60
-                            PRICE_THINKING = 3.50
-
-                            cost_usd = (
-                                (input_tokens    / 1_000_000) * PRICE_INPUT +
-                                (output_tokens   / 1_000_000) * PRICE_OUTPUT +
-                                (thinking_tokens / 1_000_000) * PRICE_THINKING
-                            )
-                            cost_ils = cost_usd * 3.7  # approximate ILS rate
-
-                            print(
-                                f"[ai] tokens — input: {input_tokens:,}, "
-                                f"output: {output_tokens:,}, "
-                                f"thinking: {thinking_tokens:,}, "
-                                f"total: {total_tokens:,} | "
-                                f"cost: ${cost_usd:.4f} (~₪{cost_ils:.3f})"
-                            )
-
-                            # Append to usage log file
-                            import datetime
-                            log_entry = {
-                                "ts":       datetime.datetime.now().isoformat(timespec="seconds"),
-                                "input":    input_tokens,
-                                "output":   output_tokens,
-                                "thinking": thinking_tokens,
-                                "total":    total_tokens,
-                                "usd":      round(cost_usd, 6),
-                                "ils":      round(cost_ils, 4),
-                            }
-                            try:
-                                log_path = os.path.join(os.path.dirname(__file__), "usage_log.jsonl")
-                                with open(log_path, "a", encoding="utf-8") as lf:
-                                    lf.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-                            except Exception as le:
-                                print(f"[ai] log write error: {le}")
-
-                            # Send usage summary to frontend
-                            yield f"data: {json.dumps({'usage': log_entry})}\n\n"
-                    except json.JSONDecodeError:
-                        continue
-
-            # Signal end of stream
-            yield f"data: {json.dumps({'done': True})}\n\n"
-
-        except Exception as e:
-            print(f"[ai] stream exception: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-    return Response(
-        generate(),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # important for nginx proxies
-            "Connection": "keep-alive",
-        }
-    )
-
-
-@app.route("/api/export-docx", methods=["POST"])
-def export_docx():
-    """
-    Generate a Word document from AI summary text.
-    Matches the formatting of the reference document (החלטה_סיכומים.docx).
-    """
-    import io
-    import datetime
-    import docx as _docx
-    from docx.shared import Pt, Cm, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-
-    body = request.json
-    text        = body.get("text", "").strip()
-    case_number = body.get("caseNumber", "")
-    case_title  = body.get("caseTitle", "")
-    court_name  = body.get("courtName", "בית הדין הרבני")
-
-    if not text:
-        return jsonify({"error": "no text provided"}), 400
-
-    doc = _docx.Document()
-
-    # ── Page setup (match reference: ~A4 with custom margins) ──────────────────
-    section = doc.sections[0]
-    section.page_width  = 7560310   # ~534 mm  (same as reference)
-    section.page_height = 10692130  # ~756 mm
-    section.left_margin   = 900430   # ~1.58 cm
-    section.right_margin  = 1141095  # ~2.01 cm
-    section.top_margin    = 331470   # ~0.58 cm
-    section.bottom_margin = 810260   # ~1.43 cm
-
-    # ── RTL document direction ──────────────────────────────────────────────────
-    body_el = doc.element.body
-    sectPr = body_el.get_or_add_sectPr()
-    bidi = OxmlElement('w:bidi')
-    sectPr.append(bidi)
-
-    FONT_NAME = 'FrankRuehl'   # Frank Ruehl — standard rabbinical court font
-    FONT_SIZE = 14
-
-    def set_rtl_paragraph(p, space_before_pt=4, space_after_pt=4, center=False):
-        pf = p.paragraph_format
-        pf.space_before = Pt(space_before_pt)
-        pf.space_after  = Pt(space_after_pt)
-        pf.alignment    = WD_ALIGN_PARAGRAPH.CENTER if center else WD_ALIGN_PARAGRAPH.JUSTIFY
-        pPr = p._p.get_or_add_pPr()
-        bidi_el = OxmlElement('w:bidi')
-        pPr.append(bidi_el)
-        jc = OxmlElement('w:jc')
-        jc.set(qn('w:val'), 'center' if center else 'both')
-        pPr.append(jc)
-        return p
-
-    def add_paragraph(text_content, bold=False, center=False,
-                      space_before_pt=4, space_after_pt=4,
-                      font_size=None, color=None, underline=False):
-        p = doc.add_paragraph()
-        set_rtl_paragraph(p, space_before_pt, space_after_pt, center)
-        run = p.add_run(text_content)
-        run.font.name      = FONT_NAME
-        run.font.size      = Pt(font_size or FONT_SIZE)
-        run.font.bold      = bold
-        run.font.underline = underline
-        if color:
-            run.font.color.rgb = RGBColor(*color)
-        rPr = run._r.get_or_add_rPr()
-        rtl_el = OxmlElement('w:rtl')
-        rPr.append(rtl_el)
-        lang = OxmlElement('w:lang')
-        lang.set(qn('w:bidi'), 'he-IL')
-        rPr.append(lang)
-        return p
-
-    # ── Header ──────────────────────────────────────────────────────────────────
-    add_paragraph("בבית הדין הרבני האזורי", bold=True, center=True, space_before_pt=6, space_after_pt=2)
-    add_paragraph(court_name, bold=True, center=True, space_after_pt=6)
-
-    if case_number:
-        add_paragraph(f"תיק מס' {case_number}", center=True, space_after_pt=2)
-    if case_title:
-        add_paragraph(case_title, center=True, space_after_pt=6)
-
-    # Divider line
-    p_div = doc.add_paragraph()
-    pPr = p_div._p.get_or_add_pPr()
-    pBdr = OxmlElement('w:pBdr')
-    bottom = OxmlElement('w:bottom')
-    bottom.set(qn('w:val'), 'single')
-    bottom.set(qn('w:sz'), '6')
-    bottom.set(qn('w:space'), '1')
-    bottom.set(qn('w:color'), '1a3a5c')
-    pBdr.append(bottom)
-    pPr.append(pBdr)
-    p_div.paragraph_format.space_after = Pt(8)
-
-    add_paragraph("סיכום AI", bold=True, center=True, space_before_pt=6, space_after_pt=10)
-
-    # ── Body text ────────────────────────────────────────────────────────────────
-    # Split by blank lines into paragraphs
-    paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-
-    for para in paragraphs:
-        # Detect section headers: short lines (< 60 chars) not ending with period/comma
-        is_header = (len(para) < 60 and
-                     not para.endswith(('.', ',', ':', ')', '"', "'")) and
-                     not para[0].isdigit())
-        if is_header:
-            add_paragraph(para, bold=True, space_before_pt=8, space_after_pt=4)
-        else:
-            add_paragraph(para, space_before_pt=3, space_after_pt=3)
-
-    # ── Footer ───────────────────────────────────────────────────────────────────
-    p_div2 = doc.add_paragraph()
-    pPr2 = p_div2._p.get_or_add_pPr()
-    pBdr2 = OxmlElement('w:pBdr')
-    top = OxmlElement('w:top')
-    top.set(qn('w:val'), 'single')
-    top.set(qn('w:sz'), '4')
-    top.set(qn('w:space'), '1')
-    top.set(qn('w:color'), 'aaaaaa')
-    pBdr2.append(top)
-    pPr2.append(pBdr2)
-    p_div2.paragraph_format.space_before = Pt(12)
-
-    now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-    add_paragraph(f"הופק על ידי מערכת שירה AI  |  {now}", font_size=9, center=True, color=(150, 150, 150))
-
-    # ── Save to buffer ────────────────────────────────────────────────────────
-    buf = io.BytesIO()
-    doc.save(buf)
-    buf.seek(0)
-
-    filename = f"סיכום_AI_{case_number or 'תיק'}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.docx"
-
-    from flask import send_file
-    return send_file(
-        buf,
-        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        as_attachment=True,
-        download_name=filename
-    )
-
-
-@app.route("/api/usage")
-def usage_stats():
-    """Return aggregated usage stats from the log file."""
-    log_path = os.path.join(os.path.dirname(__file__), "usage_log.jsonl")
-    if not os.path.exists(log_path):
-        return jsonify({"queries": 0, "total_tokens": 0, "total_usd": 0, "total_ils": 0, "entries": []})
-    entries = []
-    try:
-        with open(log_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    entries.append(json.loads(line))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-    total_usd     = sum(e.get("usd", 0)      for e in entries)
-    total_ils     = sum(e.get("ils", 0)      for e in entries)
-    total_tokens  = sum(e.get("total", 0)    for e in entries)
-    total_input   = sum(e.get("input", 0)    for e in entries)
-    total_output  = sum(e.get("output", 0)   for e in entries)
-    total_think   = sum(e.get("thinking", 0) for e in entries)
-
-    return jsonify({
-        "queries":        len(entries),
-        "total_tokens":   total_tokens,
-        "total_input":    total_input,
-        "total_output":   total_output,
-        "total_thinking": total_think,
-        "total_usd":      round(total_usd, 4),
-        "total_ils":      round(total_ils, 3),
-        "avg_usd":        round(total_usd / len(entries), 4) if entries else 0,
-        "last_queries":   entries[-10:]  # last 10 queries
-    })
-
-
-@app.route("/api/health")
-def health():
-    return jsonify({"status": "ok", "shira": SHIRA})
-
-
 if __name__ == "__main__":
-    import threading
-    import webbrowser
-    import sys
-    import time
-
+    import time, webbrowser, threading
     PORT = 5050
-    URL  = f"http://localhost:{PORT}"
-
-    def open_browser():
-        time.sleep(1.5)   # wait for Flask to start
-        webbrowser.open(URL)
-
-    threading.Thread(target=open_browser, daemon=True).start()
-
-    print(f"ShiraAI running at {URL}")
+    if sys.platform == "win32":
+        import ctypes
+        try: ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+        except: pass
+        os.system(f'for /f "tokens=5" %a in (\'netstat -aon ^| findstr :{PORT} ^| findstr LISTENING\') do taskkill /f /pid %a >nul 2>&1')
+        time.sleep(0.5)
+    print(f"ShiraAI running at http://localhost:{PORT}")
+    threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
     app.run(host="127.0.0.1", port=PORT, debug=False, use_reloader=False)
