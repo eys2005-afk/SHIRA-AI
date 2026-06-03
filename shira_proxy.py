@@ -241,25 +241,31 @@ def ai_proxy():
     case_no = (b.get("caseNumber") or "").strip()
     msg     = msg[:200000]
 
-    def extract_name(side):
+    def extract_name_parts(side):
         # sideA/sideB format: "תובע/ת, שם משפחה שם פרטי, מספר ת.ז"
-        # extract just the name part (middle token between commas)
         parts = [p.strip() for p in side.split(",") if p.strip()]
-        names = [p for p in parts if not re.match(r'^\d+$', p) and '/' not in p]
-        return names
+        name_parts = []
+        for p in parts:
+            if re.match(r'^\d+$', p) or '/' in p:
+                continue
+            # add full name and each individual word
+            name_parts.append(p)
+            for word in p.split():
+                if len(word) >= 3:
+                    name_parts.append(word)
+        return name_parts
 
-    def replace_names(text, names, label):
-        for name in names:
-            if len(name) >= 2:
-                text = text.replace(name, label)
-                # also replace reversed version (for visual-order PDFs)
-                text = text.replace(name[::-1], label)
+    def replace_names(text, name_parts, label):
+        for name in name_parts:
+            text = text.replace(name, label)
+            text = text.replace(name[::-1], label)  # reversed (visual-order PDFs)
         return text
 
-    msg = replace_names(msg, extract_name(side_a), "צד א")
-    msg = replace_names(msg, extract_name(side_b), "צד ב")
+    msg = replace_names(msg, extract_name_parts(side_a), "צד א")
+    msg = replace_names(msg, extract_name_parts(side_b), "צד ב")
     if case_no:
         msg = msg.replace(case_no, "[תיק]")
+        msg = msg.replace(case_no.split("/")[0], "[תיק]")  # also replace base number
     msg = anonymize(msg)
     url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
     print(f"[ai] sending {len(msg)} chars to Gemini | sideA={side_a!r} sideB={side_b!r} case={case_no!r}")
