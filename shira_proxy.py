@@ -12,7 +12,7 @@ if getattr(sys, 'frozen', False):
     import warnings
     warnings.filterwarnings("ignore")
 
-VERSION = "2.1"
+VERSION = "2.2"
 
 os.environ['NO_PROXY'] = 'shira2,prod-spfe,10.67.60.51,localhost,127.0.0.1'
 urllib3.disable_warnings()
@@ -378,8 +378,7 @@ def do_update():
                 f'timeout /t 2 /nobreak >nul\n'
                 f'copy /y "{new_exe}" "{curr_exe}"\n'
                 f'del /f /q "{new_exe}"\n'
-                f'cd /d "{exe_dir}"\n'
-                f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{curr_exe}\'"\n'
+                f'explorer "{curr_exe}"\n'
                 f'del "%~0"\n'
             )
             import subprocess, threading
