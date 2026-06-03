@@ -12,7 +12,7 @@ if getattr(sys, 'frozen', False):
     import warnings
     warnings.filterwarnings("ignore")
 
-VERSION = "2.4"
+VERSION = "2.5"
 
 os.environ['NO_PROXY'] = 'shira2,prod-spfe,10.67.60.51,localhost,127.0.0.1'
 urllib3.disable_warnings()
