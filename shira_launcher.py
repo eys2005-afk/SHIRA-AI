@@ -2,15 +2,19 @@
 ShiraAI Launcher — compiled once into ShiraAI.exe via PyInstaller.
 
 On every launch:
-  1. Download the latest shira_proxy.py from GitHub (through corporate proxy).
-  2. Save it next to the EXE (or in %TEMP% as fallback).
+  1. Read update_url.txt (next to the EXE) to get the internal update server URL.
+  2. Download the latest shira_proxy.py from that server (direct LAN, no proxy).
   3. Find a real system Python interpreter (never sys.executable, which IS this EXE).
   4. Run shira_proxy.py with that interpreter and wait for it to exit.
 
+update_url.txt contains one line: the base URL of the update server, e.g.
+    http://10.67.4.32:8081
+The launcher fetches:  <base_url>/shira_proxy.py
+
 No Python installation is needed on the machine for the EXE itself, but Python
 must be installed so Flask/requests/etc. are available for the actual app.
-If no system Python is found the EXE falls back to running the locally-saved
-copy without updating, so the last-known-good version still works.
+If the download fails the EXE falls back to running the locally-saved copy,
+so the last-known-good version still works.
 """
 
 import os
@@ -22,10 +26,7 @@ import urllib.error
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-GITHUB_RAW_URL = (
-    "https://raw.githubusercontent.com/eys2005-afk/SHIRA-AI/master/shira_proxy.py"
-)
-CORPORATE_PROXY = "http://192.168.174.80:8080"
+UPDATE_URL_FILE = "update_url.txt"   # sits next to the EXE
 SCRIPT_NAME = "shira_proxy.py"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -41,18 +42,39 @@ def _local_script_path() -> str:
     return os.path.join(_exe_dir(), SCRIPT_NAME)
 
 
+def _read_update_url() -> str | None:
+    """Read the base update-server URL from update_url.txt next to the EXE."""
+    path = os.path.join(_exe_dir(), UPDATE_URL_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            url = f.read().strip().rstrip("/")
+        if url:
+            return url
+    except FileNotFoundError:
+        print(f"[launcher] {UPDATE_URL_FILE} not found at {path} — skipping update.")
+    except Exception as exc:
+        print(f"[launcher] Could not read {UPDATE_URL_FILE}: {exc}")
+    return None
+
+
 def _download_script() -> bool:
     """
-    Try to download the latest shira_proxy.py via the corporate proxy.
+    Try to download the latest shira_proxy.py from the internal update server.
+    The server URL is read from update_url.txt next to the EXE.
+    No proxy is used — the server is on the local network.
     Returns True on success, False on any failure.
     """
-    proxy_handler = urllib.request.ProxyHandler(
-        {"http": CORPORATE_PROXY, "https": CORPORATE_PROXY}
-    )
-    opener = urllib.request.build_opener(proxy_handler)
+    base_url = _read_update_url()
+    if base_url is None:
+        return False
+
+    download_url = f"{base_url}/{SCRIPT_NAME}"
+
+    # Bypass any system proxy for the internal server
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        print(f"[launcher] Downloading latest {SCRIPT_NAME} …")
-        with opener.open(GITHUB_RAW_URL, timeout=15) as resp:
+        print(f"[launcher] Downloading latest {SCRIPT_NAME} from {download_url} …")
+        with opener.open(download_url, timeout=10) as resp:
             content = resp.read()
 
         dest = _local_script_path()
