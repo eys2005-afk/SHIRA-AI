@@ -12,7 +12,7 @@ if getattr(sys, 'frozen', False):
     import warnings
     warnings.filterwarnings("ignore")
 
-VERSION = "2.2"
+VERSION = "2.3"
 
 os.environ['NO_PROXY'] = 'shira2,prod-spfe,10.67.60.51,localhost,127.0.0.1'
 urllib3.disable_warnings()
@@ -366,16 +366,9 @@ def do_update():
             for chunk in r.iter_content(65536): f.write(chunk)
         if curr_exe:
             bat = os.path.join(BASE_DIR, "_updater.bat")
-            exe_dir  = os.path.dirname(curr_exe)
             open(bat, "w", encoding="ascii").write(
                 f'@echo off\n'
-                f':wait\n'
-                f'tasklist /fi "imagename eq ShiraAI.exe" | find /i "ShiraAI.exe" >nul\n'
-                f'if not errorlevel 1 (\n'
-                f'    timeout /t 1 /nobreak >nul\n'
-                f'    goto wait\n'
-                f')\n'
-                f'timeout /t 2 /nobreak >nul\n'
+                f'timeout /t 4 /nobreak >nul\n'
                 f'copy /y "{new_exe}" "{curr_exe}"\n'
                 f'del /f /q "{new_exe}"\n'
                 f'explorer "{curr_exe}"\n'
@@ -383,7 +376,7 @@ def do_update():
             )
             import subprocess, threading
             subprocess.Popen(['cmd', '/c', bat], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
-            threading.Timer(1.0, lambda: os._exit(0)).start()
+            threading.Timer(2.0, lambda: os._exit(0)).start()
             return jsonify({"ok": True, "restart": True})
         return jsonify({"ok": True, "restart": False, "msg": "Downloaded to ShiraAI_update.exe"})
     except Exception as e:
