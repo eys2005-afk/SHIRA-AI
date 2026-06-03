@@ -12,7 +12,7 @@ if getattr(sys, 'frozen', False):
     import warnings
     warnings.filterwarnings("ignore")
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 os.environ['NO_PROXY'] = 'shira2,prod-spfe,10.67.60.51,localhost,127.0.0.1'
 urllib3.disable_warnings()
@@ -366,6 +366,7 @@ def do_update():
             for chunk in r.iter_content(65536): f.write(chunk)
         if curr_exe:
             bat = os.path.join(BASE_DIR, "_updater.bat")
+            exe_dir  = os.path.dirname(curr_exe)
             open(bat, "w", encoding="ascii").write(
                 f'@echo off\n'
                 f':wait\n'
@@ -377,11 +378,12 @@ def do_update():
                 f'timeout /t 2 /nobreak >nul\n'
                 f'copy /y "{new_exe}" "{curr_exe}"\n'
                 f'del /f /q "{new_exe}"\n'
-                f'start "" "{curr_exe}"\n'
+                f'cd /d "{exe_dir}"\n'
+                f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{curr_exe}\'"\n'
                 f'del "%~0"\n'
             )
             import subprocess, threading
-            subprocess.Popen(['cmd', '/c', bat], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+            subprocess.Popen(['cmd', '/c', bat], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
             threading.Timer(1.0, lambda: os._exit(0)).start()
             return jsonify({"ok": True, "restart": True})
         return jsonify({"ok": True, "restart": False, "msg": "Downloaded to ShiraAI_update.exe"})
