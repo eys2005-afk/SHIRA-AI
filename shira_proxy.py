@@ -432,17 +432,21 @@ def do_update():
             bat = os.path.join(BASE_DIR, "_updater.bat")
             open(bat, "w", encoding="ascii").write(
                 f'@echo off\n'
-                f'timeout /t 3 /nobreak >nul\n'
+                f'timeout /t 4 /nobreak >nul\n'
                 f'taskkill /f /im ShiraAI.exe >nul 2>&1\n'
-                f'timeout /t 1 /nobreak >nul\n'
-                f'copy /y "{new_exe}" "{curr_exe}"\n'
-                f'del /f /q "{new_exe}"\n'
-                f'explorer "{curr_exe}"\n'
+                f'timeout /t 2 /nobreak >nul\n'
+                f'copy /y "{new_exe}" "{curr_exe}" >nul\n'
+                f'if errorlevel 1 (\n'
+                f'  timeout /t 3 /nobreak >nul\n'
+                f'  copy /y "{new_exe}" "{curr_exe}" >nul\n'
+                f')\n'
+                f'del /f /q "{new_exe}" >nul 2>&1\n'
+                f'start "" "{curr_exe}"\n'
                 f'del "%~0"\n'
             )
             import subprocess, threading
             subprocess.Popen(['cmd', '/c', bat], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
-            threading.Timer(2.0, lambda: os._exit(0)).start()
+            threading.Timer(3.0, lambda: os._exit(0)).start()
             return jsonify({"ok": True, "restart": True})
         return jsonify({"ok": True, "restart": False, "msg": "Downloaded to ShiraAI_update.exe"})
     except Exception as e:
