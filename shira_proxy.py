@@ -1,6 +1,6 @@
 """
 shira_proxy.py — v8 final
-pip install flask requests requests-negotiate-sspi beautifulsoup4 lxml python-docx pdfplumber flask-cors
+pip install flask requests requests-negotiate-sspi beautifulsoup4 lxml python-docx pdfminer.six flask-cors
 """
 
 import os, sys, ssl, urllib3, re, io, json, xml.etree.ElementTree as ET
@@ -12,7 +12,7 @@ if getattr(sys, 'frozen', False):
     import warnings
     warnings.filterwarnings("ignore")
 
-VERSION = "1.8"
+VERSION = "1.9"
 
 os.environ['NO_PROXY'] = 'shira2,prod-spfe,10.67.60.51,localhost,127.0.0.1'
 urllib3.disable_warnings()
@@ -23,7 +23,7 @@ from flask_cors import CORS
 import requests
 from requests_negotiate_sspi import HttpNegotiateAuth
 from bs4 import BeautifulSoup
-import pdfplumber
+from pdfminer.high_level import extract_text as pdf_extract_text
 import docx as docx_lib
 
 app = Flask(__name__)
@@ -190,8 +190,7 @@ def doc_text(doc_id):
         ext  = furl.rsplit(".", 1)[-1].lower()
         text = ""
         if ext == "pdf":
-            with pdfplumber.open(buf) as pdf:
-                text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+            text = pdf_extract_text(buf) or ""
         elif ext in ("docx", "doc"):
             text = "\n".join(p.text for p in docx_lib.Document(buf).paragraphs)
         else:

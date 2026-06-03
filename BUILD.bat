@@ -15,6 +15,12 @@ taskkill /f /im ShiraAI.exe >nul 2>&1
 :: Build
 pyinstaller --onefile --noconsole --name "ShiraAI" ^
   --hidden-import win32timezone ^
+  --hidden-import pdfminer ^
+  --hidden-import pdfminer.high_level ^
+  --hidden-import pdfminer.layout ^
+  --hidden-import pdfminer.converter ^
+  --hidden-import pdfminer.pdfinterp ^
+  --hidden-import pdfminer.pdfdevice ^
   --exclude-module torch ^
   --exclude-module scipy ^
   --exclude-module numpy ^
