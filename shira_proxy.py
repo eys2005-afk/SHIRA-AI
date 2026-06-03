@@ -425,7 +425,9 @@ def do_update():
         r = requests.get(f"{base}/ShiraAI.exe", timeout=120, stream=True, proxies={"http":None,"https":None})
         r.raise_for_status()
         new_exe  = os.path.join(BASE_DIR, "ShiraAI_update.exe")
-        curr_exe = sys.executable if getattr(sys, 'frozen', False) else None
+        frozen   = getattr(sys, 'frozen', False)
+        curr_exe = sys.executable if frozen else None
+        print(f"[update] frozen={frozen} sys.executable={sys.executable} curr_exe={curr_exe} BASE_DIR={BASE_DIR}")
         with open(new_exe, "wb") as f:
             for chunk in r.iter_content(65536): f.write(chunk)
         if curr_exe:
