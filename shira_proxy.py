@@ -189,6 +189,31 @@ mark { background: #fff176; border-radius: 2px; padding: 0 1px; }
 .mode-banner { border-radius: 8px; padding: 8px 14px; font-size: 12px; margin-bottom: 16px; font-weight: 500; }
 .mode-banner-user { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
 .mode-banner-dev  { background: #fff8e1; color: #e65100; border: 1px solid #ffe0b2; }
+/* ── Calendar ── */
+.cal-nav { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+.cal-nav h2 { font-size:16px; font-weight:600; color:#1a3a5c; flex:1; text-align:center; }
+.cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:2px; }
+.cal-dow  { text-align:center; font-size:11px; font-weight:600; color:#888;
+            padding:4px 0; background:#f8f9fb; border-radius:4px; }
+.cal-cell { min-height:72px; border:1px solid #e8eaed; border-radius:6px;
+            padding:4px; background:#fff; vertical-align:top; font-size:11px;
+            transition:background 0.15s; }
+.cal-cell:hover { background:#f0f6ff; }
+.cal-cell.today  { border-color:#1a3a5c; background:#eef3f9; }
+.cal-cell.other  { background:#f8f9fb; }
+.cal-cell.shabbat { background:#fff8f8; }
+.cal-day-num { font-size:11px; font-weight:600; color:#999; margin-bottom:3px; }
+.cal-cell.today .cal-day-num { color:#1a3a5c; }
+.cal-event { border-radius:3px; padding:2px 4px; margin-bottom:2px;
+             font-size:10px; line-height:1.4; cursor:pointer;
+             white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cal-event:hover { opacity:0.8; }
+.ev-a { background:#dbeafe; color:#1e40af; }
+.ev-b { background:#dcfce7; color:#166534; }
+.ev-c { background:#fef9c3; color:#854d0e; }
+.ev-x { background:#f3e8ff; color:#6b21a8; }
+.cal-legend { display:flex; gap:12px; margin-top:8px; font-size:11px; color:#555; align-items:center; flex-wrap:wrap; }
+.cal-legend-dot { width:10px; height:10px; border-radius:3px; display:inline-block; margin-left:4px; }
 </style>
 </head>
 <body>
@@ -222,6 +247,31 @@ mark { background: #fff176; border-radius: 2px; padding: 0 1px; }
 
   <div id="mode-banner" style="display:none"></div>
 
+  <!-- ── Hearing Calendar Card ─────────────────────────────────────────── -->
+  <div class="card" id="cal-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0;">
+      <div class="card-title" style="margin-bottom:0;">📅 לוח דיונים חודשי</div>
+      <button class="sm" onclick="toggleCalCard()" id="cal-toggle-btn">הצג ▼</button>
+    </div>
+    <div id="cal-body" style="display:none;margin-top:14px;">
+      <div class="cal-nav">
+        <button onclick="calPrev()">&#8250; הקודם</button>
+        <h2 id="cal-title">—</h2>
+        <button onclick="calNext()">הבא &#8249;</button>
+        <button class="primary" onclick="loadCalendar()" id="cal-load-btn">טען דיונים</button>
+      </div>
+      <div id="cal-status" style="font-size:12px;color:#888;margin-bottom:8px;min-height:16px;"></div>
+      <div class="cal-legend">
+        <span><span class="cal-legend-dot ev-a"></span>הרכב א</span>
+        <span><span class="cal-legend-dot ev-b"></span>הרכב ב</span>
+        <span><span class="cal-legend-dot ev-c"></span>הרכב ג</span>
+        <span><span class="cal-legend-dot ev-x"></span>אחר</span>
+      </div>
+      <div id="cal-grid-wrap" style="margin-top:10px;"></div>
+    </div>
+  </div>
+
+  <!-- ── Case Search Card ──────────────────────────────────────────────── -->
   <div class="card">
     <div class="card-title">🔍 חיפוש תיקים</div>
     <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid #e0e4ea;padding-bottom:0;">
