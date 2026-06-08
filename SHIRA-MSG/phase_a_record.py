@@ -41,10 +41,8 @@ async def main():
     captured = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, channel="chrome")
-        context = await browser.new_context(
-            ignore_https_errors=True,
-        )
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context(ignore_https_errors=True)
         page = await context.new_page()
 
         # Capture every request+response
@@ -72,10 +70,13 @@ async def main():
         page.on("response", on_response)
 
         await page.goto(UPLOAD_URL)
-        print("Browser opened. Waiting for you to upload a file and close...")
+        print("Browser opened. Upload a file, then CLOSE the browser tab.")
 
-        # Wait until browser is closed
-        await browser.wait_for_event("disconnected")
+        # Wait until the page/browser is closed
+        try:
+            await page.wait_for_event("close", timeout=300_000)
+        except Exception:
+            pass
 
     # ── Print results ─────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
