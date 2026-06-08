@@ -1,116 +1,132 @@
 """
 phase_a_record.py
 =================
-Opens Shira's document upload form in a real browser (Playwright).
-Records ALL network requests so we can see exactly which endpoint
-creates the document record and what it returns.
+Connects to your existing Chrome browser (already logged in to Shira)
+and records all network requests while you do the document upload manually.
 
-Run:
-    pip install playwright
-    playwright install chromium
+STEP 1 — Close Chrome completely, then relaunch it with remote debugging:
+    "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+
+STEP 2 — Run this script:
     python phase_a_record.py
 
-Then manually upload any .docx file in the browser window that opens.
-After you close the browser, this script prints every POST/XHR request
-that was captured — especially any that return a DocumentID.
+STEP 3 — In Chrome: navigate to a Shira case → Documents tab → upload a .docx → save
+STEP 4 — Press ENTER in this CMD window when done
 """
 
-import asyncio, json, re
-from pathlib import Path
+import asyncio, re, sys
 from playwright.async_api import async_playwright
 
-SHIRA   = "http://shira2"
-FILE_ID = "2923739"
-
-# Open Shira main page — navigate to the case and do the upload manually
-UPLOAD_URL = f"{SHIRA}/classic/"
+TARGET_HOST = "shira2"
 
 async def main():
     print("=" * 60)
-    print("  Shira upload recorder")
+    print("  Shira network recorder  (connecting to your Chrome)")
     print("=" * 60)
-    print(f"\nOpening: {UPLOAD_URL}")
-    print("\nInstructions:")
-    print("  1. The browser will open Shira")
-    print("  2. Navigate to ANY case → Documents tab → add a document → upload any .docx")
-    print("  3. Complete the save process all the way through")
-    print("  4. Close the browser tab when done")
-    print("\nAll network requests will be printed below.\n")
+    print("\nMake sure Chrome was launched with:")
+    print('  chrome.exe --remote-debugging-port=9222\n')
+    print("Connecting to Chrome on localhost:9222 ...")
 
     captured = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context(ignore_https_errors=True)
-        page = await context.new_page()
+        try:
+            browser = await p.chromium.connect_over_cdp("http://localhost:9222")
+        except Exception as e:
+            print(f"\n❌ Could not connect: {e}")
+            print("\nMake sure you launched Chrome with --remote-debugging-port=9222")
+            return
 
-        # Capture every request+response
+        print("✅ Connected to Chrome!\n")
+
+        # Use the first existing context/page
+        contexts = browser.contexts
+        if not contexts:
+            context = await browser.new_context()
+        else:
+            context = contexts[0]
+
+        pages = context.pages
+        if not pages:
+            page = await context.new_page()
+        else:
+            page = pages[0]
+
+        # Capture every request+response on shira2
         async def on_request(request):
-            captured.append({
-                "type": "request",
-                "method": request.method,
-                "url": request.url,
-                "post_data": request.post_data,
-            })
+            if TARGET_HOST in request.url:
+                captured.append({
+                    "type": "request",
+                    "method": request.method,
+                    "url": request.url,
+                    "post_data": (request.post_data or "")[:1000],
+                })
 
         async def on_response(response):
-            try:
-                body = await response.text()
-            except Exception:
-                body = "(binary)"
-            captured.append({
-                "type": "response",
-                "status": response.status,
-                "url": response.url,
-                "body": body[:2000],
-            })
+            if TARGET_HOST in response.url:
+                try:
+                    body = await response.text()
+                except Exception:
+                    body = "(binary)"
+                captured.append({
+                    "type": "response",
+                    "status": response.status,
+                    "url": response.url,
+                    "body": body[:3000],
+                })
 
-        page.on("request", on_request)
-        page.on("response", on_response)
+        # Listen on all pages in the context
+        context.on("request", on_request)
+        context.on("response", on_response)
 
-        await page.goto(UPLOAD_URL)
-        print("Browser opened. Upload a file, then CLOSE the browser tab.")
-
-        # Wait until the page/browser is closed
-        try:
-            await page.wait_for_event("close", timeout=300_000)
-        except Exception:
-            pass
+        print("Recording started. Go do the document upload in Chrome now.")
+        print("Press ENTER here when you're done...")
+        await asyncio.get_event_loop().run_in_executor(None, input)
 
     # ── Print results ─────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("  Captured requests")
+    print("  Captured network traffic")
     print("=" * 60)
 
-    requests_only = [c for c in captured if c["type"] == "request"]
-    responses_only = {c["url"]: c for c in captured if c["type"] == "response"}
+    requests_list  = [c for c in captured if c["type"] == "request"]
+    response_map   = {}
+    for c in captured:
+        if c["type"] == "response":
+            response_map[c["url"]] = c
 
-    for req in requests_only:
-        if req["method"] in ("GET",) and ".js" in req["url"]:
-            continue  # skip static JS files
-        if req["method"] in ("GET",) and ".css" in req["url"]:
+    printed = set()
+    for req in requests_list:
+        key = req["method"] + req["url"]
+        if key in printed:
+            continue
+        printed.add(key)
+
+        # Skip static assets
+        url = req["url"]
+        if any(url.endswith(ext) for ext in (".js", ".css", ".png", ".gif", ".ico")):
+            continue
+        if "WebResource.axd" in url or "ScriptResource" in url:
             continue
 
-        resp = responses_only.get(req["url"], {})
-        body = resp.get("body", "")
+        resp  = response_map.get(url, {})
+        body  = resp.get("body", "")
         status = resp.get("status", "?")
 
-        print(f"\n{'─'*50}")
-        print(f"  {req['method']}  {req['url']}")
+        print(f"\n{'─'*55}")
+        print(f"  {req['method']}  {url}")
         print(f"  Status: {status}")
         if req.get("post_data"):
-            print(f"  POST data: {req['post_data'][:500]}")
-        if body:
-            print(f"  Response: {body[:500]}")
+            print(f"  POST: {req['post_data'][:600]}")
+        if body and req["method"] != "GET":
+            print(f"  Response: {body[:600]}")
 
-        # Highlight anything that looks like a DocumentID
+        # Flag possible DocumentIDs
         nums = re.findall(r'\b(\d{7,10})\b', body)
-        nums = [n for n in nums if n != FILE_ID]
         if nums:
-            print(f"\n  *** Possible DocumentIDs: {nums} ***")
+            print(f"\n  *** Numbers in response: {nums[:10]} ***")
 
     print("\n" + "=" * 60)
-    print("  Done — check '*** Possible DocumentIDs ***' lines above")
+    print("  Done — look for POST requests and '*** Numbers ***' lines")
     print("=" * 60)
 
 asyncio.run(main())
