@@ -22,10 +22,8 @@ from playwright.async_api import async_playwright
 SHIRA   = "http://shira2"
 FILE_ID = "2923739"
 
-UPLOAD_URL = (
-    f"{SHIRA}/classic/Forms/Documents/Scan/IframeFromMyComputerDocument.aspx"
-    f"?FileID={FILE_ID}&EntityTypeID=6&EntityID={FILE_ID}&DocumentID=0"
-)
+# Open the full case page — navigate to the documents tab and upload from there
+UPLOAD_URL = f"{SHIRA}/classic/Forms/Cases/CaseFile.aspx?FileID={FILE_ID}"
 
 async def main():
     print("=" * 60)
@@ -33,9 +31,10 @@ async def main():
     print("=" * 60)
     print(f"\nOpening: {UPLOAD_URL}")
     print("\nInstructions:")
-    print("  1. The browser will open the Shira upload form")
-    print("  2. Choose any .docx file and upload it normally")
-    print("  3. Close the browser window when done")
+    print("  1. The browser will open the Shira case page")
+    print("  2. Go to the Documents tab → add a document → upload any .docx")
+    print("  3. Complete the save process normally")
+    print("  4. Close the browser tab when done")
     print("\nAll network requests will be printed below.\n")
 
     captured = []
