@@ -13,7 +13,9 @@ save it all the way through. Then close the browser window.
 Every shira2 network request is printed below.
 """
 
-import asyncio, re
+import asyncio, re, sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 from playwright.async_api import async_playwright
 
 SHIRA       = "http://shira2"
@@ -97,7 +99,7 @@ async def main():
         body   = resp.get("body", "")
         status = resp.get("status", "?")
 
-        print(f"\n{'─'*55}")
+        print(f"\n{'-'*55}")
         print(f"  {req['method']}  {url}")
         print(f"  Status: {status}")
         if req.get("post_data"):
