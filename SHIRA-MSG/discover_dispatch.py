@@ -48,8 +48,9 @@ API_GUESSES = [
     "/api/api/notification/",
 ]
 
-SEND_HINT = re.compile(r'(send|sms|mail|email|dispatch|diur|דיוור|הודע|notif|postal|message)', re.I)
-DOC_HINT  = re.compile(r'(document|docid|מסמך)', re.I)
+SEND_HINT  = re.compile(r'(send|sms|mail|email|dispatch|diur|הודע|notif|postal|recipient|address|phone)', re.I)
+DOC_HINT   = re.compile(r'(document|docid|doc_id|מסמך)', re.I)
+RECIP_HINT = re.compile(r'(phone|mobile|cell|email|mail|address|recipient|person|sms|text|message|body|content)', re.I)
 
 def probe_asmx(s, path):
     url = SHIRA + path
@@ -64,22 +65,24 @@ def probe_asmx(s, path):
     methods = re.findall(r'\?op=(\w+)', r.text)
     methods = sorted(set(methods))
     print(f"\n  === {path}  ({len(methods)} methods) ===")
+    # 1) print ALL method names (flag send-related)
     for m in methods:
-        flag = ""
-        if SEND_HINT.search(m):
-            flag = "  <<< SEND-RELATED"
+        flag = "  <<< SEND-RELATED" if SEND_HINT.search(m) else ""
         print(f"    {m}{flag}")
-    # For each send-related method, fetch its op page to see params
+    # 2) probe params of EVERY method; flag any that take a recipient but no document
+    print(f"  --- param analysis ({path}) ---")
     for m in methods:
-        if SEND_HINT.search(m):
-            op_url = f"{url}?op={m}"
-            try:
-                rr = s.get(op_url, timeout=15)
-                params = re.findall(r'<b>(\w+)</b>', rr.text)
-                needs_doc = any(DOC_HINT.search(p) for p in params)
-                print(f"      -> {m} params={params[:12]}  needsDoc={needs_doc}")
-            except Exception as e:
-                print(f"      -> {m} (param probe error {e})")
+        op_url = f"{url}?op={m}"
+        try:
+            rr = s.get(op_url, timeout=15)
+            params = re.findall(r'<b>(\w+)</b>', rr.text)
+            needs_doc  = any(DOC_HINT.search(p)  for p in params)
+            has_recip  = any(RECIP_HINT.search(p) for p in params)
+            if has_recip:
+                star = "  *** RECIPIENT, NO DOC ***" if not needs_doc else ""
+                print(f"      {m}  params={params[:14]}  needsDoc={needs_doc}{star}")
+        except Exception:
+            pass
 
 def probe_api(s, path):
     url = SHIRA + path
