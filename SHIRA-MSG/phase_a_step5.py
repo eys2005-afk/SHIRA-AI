@@ -1,7 +1,7 @@
 """
-Phase A — Step 5b
-Dump sendtoserver.js fully + search utils.js / document.js for ACTION constants
-and JS_SubmitForm definition.
+Phase A — Step 5c
+Broad search: find where JS_SubmitForm() and ACTION_* constants are DEFINED,
+and how __FORM_ACTION / __FORM_SUBMIT_COUNTER are set before submit.
 
 Run:
     python phase_a_step5.py > js2.txt 2>&1
@@ -31,39 +31,53 @@ def grab(s, url):
     except Exception as e:
         return f"(ERROR {e})"
 
-def show_relevant(name, text, patterns):
+def show(name, text, needles):
     print("\n" + "=" * 70)
     print(f"  {name}  (len={len(text)})")
     print("=" * 70)
     lines = text.splitlines()
+    hit = False
     for i, line in enumerate(lines):
-        for pat in patterns:
-            if pat.lower() in line.lower():
+        for n in needles:
+            if n in line:
+                hit = True
                 start = max(0, i - 1)
-                end   = min(len(lines), i + 10)
-                print(f"\n  --- match '{pat}' @ line {i} ---")
+                end   = min(len(lines), i + 12)
+                print(f"\n  --- '{n}' @ line {i} ---")
                 for j in range(start, end):
                     print(f"  {lines[j]}")
                 break
+    if not hit:
+        print("  (no matches)")
 
 def main():
     s = make_session()
 
-    # Full dump of sendtoserver.js (small file)
-    print("\n" + "=" * 70)
-    print("  FULL sendtoserver.js")
-    print("=" * 70)
-    print(grab(s, f"{SHIRA}/classic/scripts/sendtoserver.js"))
+    # Definitions we hunt for
+    needles = [
+        "function JS_SubmitForm",
+        "JS_SubmitForm =",
+        "ACTION_SAVE",
+        "ACTION_REFRESH =",
+        "SAVE_STAY",
+        "__FORM_ACTION",
+        "__FORM_SUBMIT_COUNTER",
+        "SubmitFormToServer",
+        "var ACTION",
+    ]
 
-    # Search utils.js and document.js for the ACTION constants + JS_SubmitForm
-    patterns = ["ACTION_SAVE", "ACTION_REFRESH", "ACTION_NEW", "= 'SAVE",
-                '= "SAVE', "JS_SubmitForm", "var ACTION", "FORM_ACTION"]
-    for name, url in [
-        ("utils.js",    f"{SHIRA}/classic/scripts/utils.js"),
-        ("globals.js",  f"{SHIRA}/classic/scripts/globals.js"),
-        ("document.js", f"{SHIRA}/classic/forms/documents/document.js"),
-    ]:
-        show_relevant(name, grab(s, url), patterns)
+    files = {
+        "globals.js":      f"{SHIRA}/classic/scripts/globals.js",
+        "utils.js":        f"{SHIRA}/classic/scripts/utils.js",
+        "screens.js":      f"{SHIRA}/classic/scripts/screens.js",
+        "document.js":     f"{SHIRA}/classic/forms/documents/document.js",
+        "formbase.js":     f"{SHIRA}/classic/scripts/formbase.js",
+        "forms.js":        f"{SHIRA}/classic/scripts/forms.js",
+        "shira.js":        f"{SHIRA}/classic/scripts/shira.js",
+        "common.js":       f"{SHIRA}/classic/scripts/common.js",
+    }
+    for name, url in files.items():
+        show(name, grab(s, url), needles)
 
 if __name__ == "__main__":
     main()
