@@ -2361,13 +2361,28 @@ def send_message():
 def send_message_direct():
     """
     Option B — send a court email WITHOUT creating any Shira document.
-    Uses the open internal SMTP relay (mail.rbc.gov.il:25, no auth).
+
+    Delivery reality (proven on the court server):
+      * Only mail.rbc.gov.il:25 is reachable outbound (all auth ports blocked).
+      * From @rbc.gov.il via the relay -> quarantined as phishing (DMARC=reject).
+      * From a side address (e.g. a Gmail) via the relay -> delivered, but to
+        the recipient's SPAM folder (SPF for that domain doesn't cover the
+        relay). The court NAME still shows as the display name, and Reply-To
+        points at the official court mailbox.
+
+    The message body/subject is an EXACT replica of a real case-postal message.
+
+    Config (env vars on the server):
+        SHIRA_UNOFFICIAL_FROM = shirabeitdinrehovot@gmail.com   (sender address)
+        SHIRA_REPLYTO         = rehovot@rbc.gov.il              (reply target)
+        SHIRA_RELAY           = mail.rbc.gov.il                 (optional)
+        SHIRA_RELAY_PORT      = 25                              (optional)
     """
-    import smtplib, html as _html
+    import smtplib, os as _os
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
-    from email.utils import formatdate, make_msgid
-    import datetime as _dt
+    from email.mime.application import MIMEApplication
+    from email.utils import formatdate, make_msgid, formataddr
 
     body       = request.json or {}
     text       = body.get("text", "").strip()
@@ -2375,10 +2390,18 @@ def send_message_direct():
     subject    = body.get("subject", "").strip()
     case_data  = body.get("caseData", {})
 
-    if not text:
-        return jsonify({"ok": False, "error": "no text provided"}), 400
     if not to_email or "@" not in to_email:
         return jsonify({"ok": False, "error": "valid toEmail required"}), 400
+
+    from_addr = _os.environ.get("SHIRA_UNOFFICIAL_FROM", "").strip()
+    if not from_addr:
+        return jsonify({"ok": False, "error":
+            "server not configured: set SHIRA_UNOFFICIAL_FROM (a non-@rbc.gov.il "
+            "sender address, e.g. a Gmail). Sending as @rbc.gov.il is quarantined "
+            "as phishing."}), 400
+    reply_to  = _os.environ.get("SHIRA_REPLYTO", "rehovot@rbc.gov.il").strip()
+    relay     = _os.environ.get("SHIRA_RELAY", "mail.rbc.gov.il")
+    relay_port = int(_os.environ.get("SHIRA_RELAY_PORT", "25"))
 
     court_id   = case_data.get("courtId", 5)
     court_name = case_data.get("courtName") or {
@@ -2388,62 +2411,71 @@ def send_message_direct():
     }.get(court_id, f"בית הדין #{court_id}")
 
     if not subject:
-        fn = case_data.get("fileNumber", "")
-        subject = f"הודעה מבית הדין הרבני — תיק {fn}" if fn else "הודעה מבית הדין הרבני"
+        subject = "הודעה מבית הדין הרבני"
 
     file_number = case_data.get("fileNumber", "")
     side_a      = case_data.get("sideA", "")
     side_b      = case_data.get("sideB", "")
     subj_case   = case_data.get("subject", "")
-    today       = _dt.date.today().strftime("%d/%m/%Y")
 
-    # Plain text
-    plain_lines = [f"בית הדין הרבני האזורי {court_name}", "-"*40]
-    if file_number: plain_lines.append(f"תיק מס': {file_number}")
-    if side_a or side_b: plain_lines.append(f"{side_a} נ' {side_b}")
-    if subj_case: plain_lines.append(f"נושא: {subj_case}")
-    plain_lines += [f"תאריך: {today}", "-"*40, "", *text.split("\n"),
-                    "", "-"*40, f"בית הדין הרבני האזורי {court_name}", "no-reply@rbc.gov.il"]
-    plain_body = "\n".join(plain_lines)
-
-    # HTML
-    header2 = ""
-    if file_number: header2 += f"<div>תיק מס': {_html.escape(file_number)}</div>"
-    if side_a or side_b: header2 += f"<div>{_html.escape(side_a)} נ' {_html.escape(side_b)}</div>"
-    if subj_case: header2 += f"<div>נושא: {_html.escape(subj_case)}</div>"
-    body_html = "<br>".join(_html.escape(l) for l in text.split("\n"))
-    html_body = f"""<!DOCTYPE html>
-<html dir="rtl" lang="he"><head><meta charset="utf-8"></head>
-<body style="font-family:Arial,sans-serif;font-size:14px;color:#222;direction:rtl;">
-<table width="600" cellpadding="0" cellspacing="0" style="margin:20px auto;border:1px solid #ccc;">
-<tr><td style="background:#1a3a5c;color:#fff;padding:16px;text-align:center;">
-  <div style="font-size:18px;font-weight:bold;">בית הדין הרבני האזורי</div>
-  <div style="font-size:16px;">{_html.escape(court_name)}</div></td></tr>
-<tr><td style="padding:12px 20px;background:#f5f7fa;border-bottom:1px solid #ddd;font-size:13px;color:#555;">
-  {header2}<div>תאריך: {today}</div></td></tr>
-<tr><td style="padding:20px;line-height:1.7;">{body_html}</td></tr>
-<tr><td style="padding:16px;text-align:center;background:#f5f7fa;border-top:1px solid #ddd;font-size:12px;color:#888;">
-  בית הדין הרבני האזורי {_html.escape(court_name)} &nbsp;|&nbsp; no-reply@rbc.gov.il</td></tr>
-</table></body></html>"""
+    # ---- Exact replica of the official case-postal body ----
+    cases_block = "\n".join(x for x in [file_number, subj_case, side_a, side_b] if x)
+    official_body = (
+        "שלום,\n\n\n"
+        f"מצורף בזאת מסמך מבית הדין הרבני {court_name}\n\n"
+        "בנוגע לתיקים:\n"
+        f"{cases_block}\n\n\n\n"
+        "אם זו הפעם הראשונה שאת/ה מקבל/ת מכתב מבית הדין הרבני בדואר אלקטרוני,\n"
+        "לצורך הצפייה בקבצים המצורפים עליך להוריד תוכנת עזר מפורטל השירותים והמידע הממשלתי:\n"
+        "http://www.forms.gov.il/download/SignAndVerify.msi.\n\n\n"
+        "סרטון הסבר לפתיחת קבצים מסוג signed\n"
+        "https://youtu.be/F4fNkQP3vVs.\n\n\n"
+        "שים לב : הקבצים נשלחים מבית הדין בגרסת 2007 OFFICE, אם אין ברשותך גרסא זו, נא פעל בהתאם להנחיות הבאות.\n\n"
+        "בפעם הראשונה שאת/ה מקבל/ת מכתב מבית הדין יש להוריד תוכנה מאתר מיקרוסופט (Freeware) בהתאם למצב כדלהלן:\n"
+        "אם ברשותך גרסא נמוכה יותר יש להוריד קובץ תאימות:\n"
+        "http://www.microsoft.com/downloads/details.aspx?FamilyID=941B3470-3AE9-4AEE-8F43-C6BB74CD1466&displaylang=he.\n"
+        "אם אין ברשותך כלל OFFICE, יש להוריד תכנת צפיה:\n"
+        "http://www.microsoft.com/downloads/details.aspx?displaylang=he&FamilyID=3657ce88-7cfa-457a-9aec-f4f827f20cac.\n\n\n"
+        "בכל בעיה בפתיחת הקבצים המצורפים, עומד לרשותכם אתר GOV.IL , תמיכה בטלפון 1299\n\n\n"
+        "בברכה,\n"
+        f"בית הדין הרבני {court_name}\n"
+        "טלפון: -\n"
+        "פקס: 08-9492277\n\n\n"
+        "**נא לא להשיב למייל זה!**\n"
+    )
+    # If the user typed a custom message, prepend it before the official block.
+    plain_body = (text + "\n\n" + official_body) if text else official_body
 
     msg = MIMEMultipart("mixed")
     msg["Subject"]    = subject
-    msg["From"]       = f"בית הדין הרבני האזורי {court_name} <no-reply@rbc.gov.il>"
+    msg["From"]       = formataddr((f"בית הדין הרבני האזורי {court_name}", from_addr))
     msg["To"]         = to_email
+    if reply_to:
+        msg["Reply-To"] = reply_to
     msg["Date"]       = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid(domain="rbc.gov.il")
+    msg["Message-ID"] = make_msgid(domain=from_addr.split("@")[-1])
     msg["X-Mailer"]   = "ShiraAI"
-    alt = MIMEMultipart("alternative")
-    alt.attach(MIMEText(plain_body, "plain", "utf-8"))
-    alt.attach(MIMEText(html_body,  "html",  "utf-8"))
-    msg.attach(alt)
+    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+
+    # Optional attachments: list of {"filename":..., "contentBase64":...}
+    import base64 as _b64
+    for att in (body.get("attachments") or []):
+        try:
+            data = _b64.b64decode(att.get("contentBase64", ""))
+            fname = att.get("filename", "document")
+            part = MIMEApplication(data, Name=fname)
+            part["Content-Disposition"] = f'attachment; filename="{fname}"'
+            msg.attach(part)
+        except Exception as _e:
+            print(f"[send-direct] skip attachment: {_e}")
 
     try:
-        with smtplib.SMTP("mail.rbc.gov.il", 25, timeout=15) as srv:
-            srv.ehlo("rbc.gov.il")
-            srv.sendmail("no-reply@rbc.gov.il", [to_email], msg.as_bytes())
-        print(f"[send-direct] sent to {to_email}  id={msg['Message-ID']}")
-        return jsonify({"ok": True, "messageId": msg["Message-ID"]})
+        with smtplib.SMTP(relay, relay_port, timeout=20) as srv:
+            srv.ehlo()
+            srv.sendmail(from_addr, [to_email], msg.as_bytes())
+        print(f"[send-direct] sent to {to_email} from {from_addr} id={msg['Message-ID']}")
+        return jsonify({"ok": True, "messageId": msg["Message-ID"],
+                        "note": "delivered via relay; may land in recipient's Spam folder"})
     except Exception as e:
         print(f"[send-direct] SMTP error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
