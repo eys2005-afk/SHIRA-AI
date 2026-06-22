@@ -37,28 +37,27 @@ def make_session():
 # ── Part 1: probe ASMX with correct XML content-type ─────────────────────────
 
 CANDIDATE_METHODS = [
-    "GetFileParties",
-    "GetFilePartyList",
-    "GetFileContacts",
-    "GetPostalRecipients",
-    "GetPartiesDetails",
-    "GetFileSides",
-    "GetFileDetails",
-    "GetFileSideContacts",
-    "GetPartySideContacts",
+    ("GetFileParties",      f"<XmlData><FileID>{FILE_ID}</FileID></XmlData>"),
+    ("GetFilePartyList",    f"<XmlData><FileID>{FILE_ID}</FileID></XmlData>"),
+    ("GetFileContacts",     f"<XmlData><FileID>{FILE_ID}</FileID></XmlData>"),
+    ("GetPostalRecipients", f"<XmlData><FileID>{FILE_ID}</FileID></XmlData>"),
+    ("GetPartiesDetails",   f"<XmlData><FileID>{FILE_ID}</FileID></XmlData>"),
+    ("GetFileSides",        f"<XmlData><FileID>{FILE_ID}</FileID></XmlData>"),
+    ("GetFileDetails",      f"<XmlData><FileID>{FILE_ID}</FileID></XmlData>"),
+    ("GetFileDetails",      f"<XmlData><FileMainId>{FILE_ID}</FileMainId></XmlData>"),
+    ("GetFileSideContacts", f"<XmlData><FileID>{FILE_ID}</FileID></XmlData>"),
 ]
 
 def probe_asmx_xml(s):
     print("\n[Part 1] WsShiraUtils.asmx with application/xml")
     base = f"{SHIRA}/classic/WS/App/WsShiraUtils.asmx"
-    for method in CANDIDATE_METHODS:
-        xml = f"<XmlData><FileID>{FILE_ID}</FileID></XmlData>"
+    for method, xml in CANDIDATE_METHODS:
         try:
             r = s.post(f"{base}/{method}",
                        data=xml.encode("utf-8"),
                        headers={"Content-Type": "application/xml"},
                        timeout=10)
-            short = r.text[:300].replace("\n", " ")
+            short = r.text[:400].replace("\n", " ")
             print(f"  {method}: {r.status_code}  {short}")
         except Exception as e:
             print(f"  {method}: ERROR {e}")
@@ -78,7 +77,7 @@ async def scrape_postal():
             args=["--auth-server-allowlist=*shira2*",
                   "--auth-negotiate-delegate-allowlist=*shira2*"],
         )
-        ctx  = browser.new_context(ignore_https_errors=True)
+        ctx  = await browser.new_context(ignore_https_errors=True)
         page = await ctx.new_page()
         await page.goto(postal_url, wait_until="networkidle", timeout=30000)
 
