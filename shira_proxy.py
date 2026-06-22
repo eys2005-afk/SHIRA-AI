@@ -672,6 +672,15 @@ function renderMsgTab() {
     '<button style="' + btnStyle + '" onclick="saveMsgTemplate()">＋ שמור תבנית חדשה</button></div>' +
     '<div style="margin-top:14px;margin-bottom:6px;font-weight:600;font-size:14px;color:#1a3a5c">תוכן ההודעה:</div>' +
     '<textarea id="msg-text" dir="rtl" style="width:100%;height:160px;padding:10px;font-size:14px;font-family:FrankRuehl,Arial;border:1px solid #b0bec5;border-radius:6px;resize:vertical;box-sizing:border-box"></textarea>' +
+    '<div style="margin-top:12px">' +
+    '<div style="margin-bottom:8px;font-weight:600;font-size:14px;color:#1a3a5c">אופן שליחה:</div>' +
+    '<label style="margin-left:16px;cursor:pointer"><input type="radio" name="msg-send-mode" value="a" checked onchange="msgModeChanged()"> <b>א — מתוך התיק</b> (נוצר מסמך בתיק, נשלח דרך מסך הדיוור של שירה)</label><br>' +
+    '<label style="cursor:pointer"><input type="radio" name="msg-send-mode" value="b" onchange="msgModeChanged()"> <b>ב — ישיר ללא מסמך</b> (אימייל מ-no-reply@rbc.gov.il, לא נשמר בתיק)</label>' +
+    '</div>' +
+    '<div id="msg-email-row" style="display:none;margin-top:10px">' +
+    '<label style="font-size:13px;font-weight:600;color:#1a3a5c">כתובת אימייל של הנמען:</label><br>' +
+    '<input id="msg-to-email" type="email" dir="ltr" placeholder="example@domain.com" style="width:100%;padding:8px;margin-top:4px;border:1px solid #b0bec5;border-radius:6px;font-size:14px;box-sizing:border-box">' +
+    '</div>' +
     '<div style="margin-top:12px;text-align:center">' +
     '<button id="msg-send-btn" onclick="sendMessage()" style="padding:10px 32px;background:#1a3a5c;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;font-weight:600">📨 שלח הודעה</button>' +
     '</div><div id="msg-status" style="margin-top:10px;text-align:center;font-size:13px"></div></div>';
@@ -701,41 +710,65 @@ function saveMsgTemplate() {
   renderMsgTab();
 }
 
+function msgModeChanged() {
+  const mode = document.querySelector('input[name="msg-send-mode"]:checked').value;
+  document.getElementById('msg-email-row').style.display = (mode === 'b') ? 'block' : 'none';
+}
+
 async function sendMessage() {
   const text = document.getElementById('msg-text').value.trim();
   if (!text) { alert('יש להזין תוכן להודעה'); return; }
   if (!selectedCase) { alert('לא נבחר תיק'); return; }
 
+  const mode   = document.querySelector('input[name="msg-send-mode"]:checked').value;
   const btn    = document.getElementById('msg-send-btn');
   const status = document.getElementById('msg-status');
   btn.disabled = true;
   btn.textContent = '⏳ שולח...';
   status.textContent = '';
 
+  const fileId   = selectedCase.fileId || selectedCase.fileMainId;
+  const caseData = {
+    fileId:     fileId,
+    fileNumber: selectedCase.fullFileMainNumber || selectedCase.fileNumber || '',
+    sideA:      selectedCase.sideA || '',
+    sideB:      selectedCase.sideB || '',
+    subject:    selectedCase.subjectSubName || '',
+    courtName:  userCourtName || 'בית הדין הרבני',
+    courtId:    userCourtId || 5
+  };
+
   try {
-    const fileId = selectedCase.fileId || selectedCase.fileMainId;
-    const r = await fetch(`${PROXY}/api/send-message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        caseData: {
-          fileId:      fileId,
-          fileNumber:  selectedCase.fullFileMainNumber || selectedCase.fileNumber || '',
-          sideA:       selectedCase.sideA || '',
-          sideB:       selectedCase.sideB || '',
-          subject:     selectedCase.subjectSubName || '',
-          courtName:   userCourtName || 'בית הדין הרבני',
-          courtId:     userCourtId || 5
-        }
-      })
-    });
-    const data = await r.json();
-    if (data.postalUrl) {
-      status.innerHTML = '<span style="color:green">✅ המסמך נוצר בהצלחה — פותח מסך דיוור...</span>';
-      window.open(data.postalUrl, '_blank');
+    if (mode === 'b') {
+      // Option B — direct email, no Shira document
+      const toEmail = (document.getElementById('msg-to-email').value || '').trim();
+      if (!toEmail || !toEmail.includes('@')) { alert('יש להזין כתובת אימייל תקינה עבור אופן ב'); btn.disabled = false; btn.textContent = '📨 שלח הודעה'; return; }
+      const msgSubject = `הודעה מבית הדין הרבני — תיק ${caseData.fileNumber}`;
+      const r = await fetch(`${PROXY}/api/send-message-direct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, toEmail, subject: msgSubject, caseData })
+      });
+      const data = await r.json();
+      if (data.ok) {
+        status.innerHTML = '<span style="color:green">✅ האימייל נשלח ישירות — לא נוצר מסמך בתיק</span>';
+      } else {
+        status.innerHTML = `<span style="color:red">❌ שגיאה: ${data.error || 'לא ידוע'}</span>`;
+      }
     } else {
-      status.innerHTML = `<span style="color:red">❌ שגיאה: ${data.error || 'לא ידוע'}</span>`;
+      // Option A — create document + open Postal
+      const r = await fetch(`${PROXY}/api/send-message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, caseData })
+      });
+      const data = await r.json();
+      if (data.postalUrl) {
+        status.innerHTML = '<span style="color:green">✅ המסמך נוצר בהצלחה — פותח מסך דיוור...</span>';
+        window.open(data.postalUrl, '_blank');
+      } else {
+        status.innerHTML = `<span style="color:red">❌ שגיאה: ${data.error || 'לא ידוע'}</span>`;
+      }
     }
   } catch(e) {
     status.innerHTML = `<span style="color:red">❌ שגיאת תקשורת: ${e.message}</span>`;
@@ -2322,6 +2355,98 @@ def send_message():
 
     postal_url = f"{SHIRA}/classic/Forms/Postal/Postal.aspx?DocumentIDs={doc_id}&FileID={file_id}"
     return jsonify({"postalUrl": postal_url, "docId": doc_id})
+
+
+@app.route("/api/send-message-direct", methods=["POST"])
+def send_message_direct():
+    """
+    Option B — send a court email WITHOUT creating any Shira document.
+    Uses the open internal SMTP relay (mail.rbc.gov.il:25, no auth).
+    """
+    import smtplib, html as _html
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.utils import formatdate, make_msgid
+    import datetime as _dt
+
+    body       = request.json or {}
+    text       = body.get("text", "").strip()
+    to_email   = body.get("toEmail", "").strip()
+    subject    = body.get("subject", "").strip()
+    case_data  = body.get("caseData", {})
+
+    if not text:
+        return jsonify({"ok": False, "error": "no text provided"}), 400
+    if not to_email or "@" not in to_email:
+        return jsonify({"ok": False, "error": "valid toEmail required"}), 400
+
+    court_id   = case_data.get("courtId", 5)
+    court_name = case_data.get("courtName") or {
+        1:"ירושלים",2:"תל אביב",3:"חיפה",4:"פתח תקוה",5:"רחובות",
+        6:"באר שבע",7:"טבריה",8:"צפת",9:"אשדוד",10:"אשקלון",
+        11:"נתניה",12:"בית הדין הגדול",13:"אריאל",
+    }.get(court_id, f"בית הדין #{court_id}")
+
+    if not subject:
+        fn = case_data.get("fileNumber", "")
+        subject = f"הודעה מבית הדין הרבני — תיק {fn}" if fn else "הודעה מבית הדין הרבני"
+
+    file_number = case_data.get("fileNumber", "")
+    side_a      = case_data.get("sideA", "")
+    side_b      = case_data.get("sideB", "")
+    subj_case   = case_data.get("subject", "")
+    today       = _dt.date.today().strftime("%d/%m/%Y")
+
+    # Plain text
+    plain_lines = [f"בית הדין הרבני האזורי {court_name}", "-"*40]
+    if file_number: plain_lines.append(f"תיק מס': {file_number}")
+    if side_a or side_b: plain_lines.append(f"{side_a} נ' {side_b}")
+    if subj_case: plain_lines.append(f"נושא: {subj_case}")
+    plain_lines += [f"תאריך: {today}", "-"*40, "", *text.split("\n"),
+                    "", "-"*40, f"בית הדין הרבני האזורי {court_name}", "no-reply@rbc.gov.il"]
+    plain_body = "\n".join(plain_lines)
+
+    # HTML
+    header2 = ""
+    if file_number: header2 += f"<div>תיק מס': {_html.escape(file_number)}</div>"
+    if side_a or side_b: header2 += f"<div>{_html.escape(side_a)} נ' {_html.escape(side_b)}</div>"
+    if subj_case: header2 += f"<div>נושא: {_html.escape(subj_case)}</div>"
+    body_html = "<br>".join(_html.escape(l) for l in text.split("\n"))
+    html_body = f"""<!DOCTYPE html>
+<html dir="rtl" lang="he"><head><meta charset="utf-8"></head>
+<body style="font-family:Arial,sans-serif;font-size:14px;color:#222;direction:rtl;">
+<table width="600" cellpadding="0" cellspacing="0" style="margin:20px auto;border:1px solid #ccc;">
+<tr><td style="background:#1a3a5c;color:#fff;padding:16px;text-align:center;">
+  <div style="font-size:18px;font-weight:bold;">בית הדין הרבני האזורי</div>
+  <div style="font-size:16px;">{_html.escape(court_name)}</div></td></tr>
+<tr><td style="padding:12px 20px;background:#f5f7fa;border-bottom:1px solid #ddd;font-size:13px;color:#555;">
+  {header2}<div>תאריך: {today}</div></td></tr>
+<tr><td style="padding:20px;line-height:1.7;">{body_html}</td></tr>
+<tr><td style="padding:16px;text-align:center;background:#f5f7fa;border-top:1px solid #ddd;font-size:12px;color:#888;">
+  בית הדין הרבני האזורי {_html.escape(court_name)} &nbsp;|&nbsp; no-reply@rbc.gov.il</td></tr>
+</table></body></html>"""
+
+    msg = MIMEMultipart("mixed")
+    msg["Subject"]    = subject
+    msg["From"]       = f"בית הדין הרבני האזורי {court_name} <no-reply@rbc.gov.il>"
+    msg["To"]         = to_email
+    msg["Date"]       = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain="rbc.gov.il")
+    msg["X-Mailer"]   = "ShiraAI"
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(plain_body, "plain", "utf-8"))
+    alt.attach(MIMEText(html_body,  "html",  "utf-8"))
+    msg.attach(alt)
+
+    try:
+        with smtplib.SMTP("mail.rbc.gov.il", 25, timeout=15) as srv:
+            srv.ehlo("rbc.gov.il")
+            srv.sendmail("no-reply@rbc.gov.il", [to_email], msg.as_bytes())
+        print(f"[send-direct] sent to {to_email}  id={msg['Message-ID']}")
+        return jsonify({"ok": True, "messageId": msg["Message-ID"]})
+    except Exception as e:
+        print(f"[send-direct] SMTP error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/usage")
