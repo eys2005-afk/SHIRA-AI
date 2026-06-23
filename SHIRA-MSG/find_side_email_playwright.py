@@ -53,7 +53,13 @@ async def main():
 
         page.on("response", on_response)
 
-        # ---- Step 1: open case page ----
+        # ---- Step 1: login ----
+        login_url = f"{SHIRA}/App/login"
+        print(f"Logging in: {login_url}")
+        await page.goto(login_url, timeout=30000, wait_until="networkidle")
+        await page.wait_for_timeout(3000)
+
+        # ---- Step 2: open case page ----
         case_url = f"{SHIRA}/classic/Forms/FileMain/FileMain.aspx?FileID={FILE_ID}&CourtID={COURT_ID}"
         print(f"Opening case: {case_url}")
         await page.goto(case_url, timeout=30000, wait_until="networkidle")
@@ -99,8 +105,9 @@ async def main():
                 pass
 
         # ---- Step 4: also intercept ALL requests for 10 sec ----
-        print("\n\nWaiting 10s — please manually click on a party row in the browser...")
-        await page.wait_for_timeout(10000)
+        print("\n\nWaiting 60s — please manually click on a party row in the browser...")
+        print("   (open party details, click around — we are recording all network calls)")
+        await page.wait_for_timeout(60000)
 
         # ---- Step 5: dump everything captured ----
         print("\n" + "="*60)
@@ -119,8 +126,8 @@ async def main():
                 all_requests.append(req.url)
         page.on("request", on_req)
 
-        print("\nCapturing ALL XHR/Fetch for another 15s — click around the party details...")
-        await page.wait_for_timeout(15000)
+        print("\nCapturing ALL XHR/Fetch for another 60s — keep clicking around party details...")
+        await page.wait_for_timeout(60000)
 
         print("\n" + "="*60)
         print("  ALL XHR/Fetch requests seen:")
