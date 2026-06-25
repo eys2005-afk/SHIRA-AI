@@ -47,46 +47,68 @@ FILE_ID  = sys.argv[1] if len(sys.argv) > 1 else "2923739"
 
 
 def get_sides(file_id):
-    """Fetch FileSides.aspx and extract SideID, PersonID, name, type."""
+    """
+    Fetch FileSides.aspx and extract SideID + PersonID from the Shira grid tables.
+
+    FileSides.aspx uses classic Shira grids (grdSideA / grdSideB / grdSideC).
+    There are no <a href> links — party data lives in TD cells.
+    Column layout (from filesides.js):
+        Col 0 = SideID, Col 1 = PersonID, Col 2 = SideTypeID, Col 4 = IsMainSide
+    """
     url = (f"{SHIRA}/classic/Forms/File/Contents/FileSides.aspx"
            f"?userid={USER_ID}&courtid={COURT_ID}"
            f"&FileID={file_id}&EntityId={file_id}&EntityTypeId=6")
     r = SESSION.get(url, timeout=15)
     if r.status_code != 200:
-        print(f"[FAIL] FileSides.aspx → {r.status_code}")
+        print(f"[FAIL] FileSides.aspx -> {r.status_code}")
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
     sides = []
 
-    # Each party row links to Person.aspx — extract params from the href
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if "Person.aspx" not in href:
+    # Parse each of the three party grid tables
+    for grid_id in ("grdSideA", "grdSideB", "grdSideC"):
+        table = soup.find("table", {"id": grid_id})
+        if not table:
             continue
-        params = dict(re.findall(r'([A-Za-z]+)=([^&]+)', href))
-        person_id = params.get("PersonID", "")
-        side_id   = params.get("SideID", "")
-        side_type = params.get("SideTypeID", "")
-        name      = a.get_text(strip=True)
-        if person_id:
-            sides.append({
-                "personId": person_id,
-                "sideId":   side_id,
-                "sideTypeId": side_type,
-                "name":     name,
-                "href":     href,
-            })
-
-    # Fallback: look for PersonID in any onclick / JS
-    if not sides:
-        for tag in soup.find_all(attrs={"onclick": True}):
-            m = re.search(r'PersonID=(\d+).*?SideID=(\d+)', tag["onclick"])
-            if m:
+        rows = table.find_all("tr")
+        for row in rows[1:]:  # skip header row
+            cells = row.find_all("td")
+            if len(cells) < 2:
+                continue
+            # Col 0 = SideID (may be hidden span or direct text)
+            side_id   = cells[0].get_text(strip=True)
+            person_id = cells[1].get_text(strip=True)
+            side_type = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+            # Name is usually col 5 or 6 — grab first non-numeric cell text
+            name = ""
+            for c in cells[3:]:
+                t = c.get_text(strip=True)
+                if t and not t.isdigit() and len(t) > 1:
+                    name = t
+                    break
+            if person_id and person_id.isdigit():
                 sides.append({
-                    "personId": m.group(1),
-                    "sideId":   m.group(2),
-                    "name":     tag.get_text(strip=True),
+                    "personId":   person_id,
+                    "sideId":     side_id,
+                    "sideTypeId": side_type,
+                    "name":       name,
+                    "grid":       grid_id,
+                })
+
+    # Fallback: scan all hidden inputs for PersonID patterns
+    if not sides:
+        for inp in soup.find_all("input", {"type": "hidden"}):
+            v = inp.get("value", "")
+            # Shira hidden grid rows look like "SideID|SideTypeID|...|PersonID|..."
+            parts = v.split("|")
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                sides.append({
+                    "personId": parts[1],
+                    "sideId":   parts[0],
+                    "sideTypeId": parts[2] if len(parts) > 2 else "",
+                    "name":     "",
+                    "grid":     inp.get("name", ""),
                 })
 
     return sides
