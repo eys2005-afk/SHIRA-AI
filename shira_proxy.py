@@ -2294,6 +2294,69 @@ def create_message_docx(text, case_data, court_name):
     return buf
 
 
+@app.route("/api/side-contacts/<int:file_id>")
+def side_contacts(file_id):
+    """
+    Return party contact details (name, email, phone) for a case.
+    Parses FileSides.aspx (grid tables grdSideA/B/C) then Person.aspx per party.
+    """
+    import re as _re
+    from bs4 import BeautifulSoup as _BS
+
+    USER_ID  = SESSION.get(f"{SHIRA}/api/api/userController/GetUser", timeout=10).json().get("userId", 1438)
+    court_id = 5  # default; could be passed as query param
+
+    url = (f"{SHIRA}/classic/Forms/File/Contents/FileSides.aspx"
+           f"?userid={USER_ID}&courtid={court_id}"
+           f"&FileID={file_id}&EntityId={file_id}&EntityTypeId=6")
+    r = SESSION.get(url, timeout=15)
+    if r.status_code != 200:
+        return jsonify({"error": f"FileSides.aspx returned {r.status_code}"}), 500
+
+    soup = _BS(r.text, "html.parser")
+    parties = []
+
+    for grid_id in ("grdSideA", "grdSideB", "grdSideC"):
+        table = soup.find("table", {"id": grid_id})
+        if not table:
+            continue
+        for row in table.find_all("tr")[1:]:
+            cells = row.find_all("td")
+            if len(cells) < 2:
+                continue
+            side_id   = cells[0].get_text(strip=True)
+            person_id = cells[1].get_text(strip=True)
+            side_type = cells[2].get_text(strip=True) if len(cells) > 2 else "1"
+            if not (person_id and person_id.isdigit()):
+                continue
+            # Fetch Person.aspx for contact details
+            p_url = (f"{SHIRA}/classic/Forms/General/Person/Person.aspx"
+                     f"?FileID={file_id}&PersonID={person_id}"
+                     f"&SideType=1&SideTypeID={side_type}&SideID={side_id}")
+            pr = SESSION.get(p_url, timeout=15)
+            ps = _BS(pr.text, "html.parser") if pr.status_code == 200 else None
+
+            def _val(name):
+                if not ps:
+                    return ""
+                t = ps.find("input", {"name": name}) or ps.find("textarea", {"name": name})
+                return (t.get("value", "") if t else "").strip()
+
+            parties.append({
+                "personId":   person_id,
+                "sideId":     side_id,
+                "grid":       grid_id,
+                "firstName":  _val("txtFirstName"),
+                "lastName":   _val("txtLastName"),
+                "email":      _val("txtEmail"),
+                "phone":      _val("txtPhone"),
+                "mobile":     _val("txtMobile"),
+                "idNum":      _val("txtIDNumber"),
+            })
+
+    return jsonify(parties)
+
+
 @app.route("/api/send-message", methods=["POST"])
 def send_message():
     import re as _re, time as _time, getpass as _getpass
