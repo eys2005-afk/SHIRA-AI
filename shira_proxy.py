@@ -677,9 +677,10 @@ function renderMsgTab() {
     '<label style="margin-left:16px;cursor:pointer"><input type="radio" name="msg-send-mode" value="a" checked onchange="msgModeChanged()"> <b>א — מתוך התיק</b> (נוצר מסמך בתיק, נשלח דרך מסך הדיוור של שירה)</label><br>' +
     '<label style="cursor:pointer"><input type="radio" name="msg-send-mode" value="b" onchange="msgModeChanged()"> <b>ב — ישיר ללא מסמך</b> (אימייל מ-no-reply@rbc.gov.il, לא נשמר בתיק)</label>' +
     '</div>' +
-    '<div id="msg-email-row" style="display:none;margin-top:10px">' +
-    '<label style="font-size:13px;font-weight:600;color:#1a3a5c">כתובת אימייל של הנמען:</label><br>' +
-    '<input id="msg-to-email" type="email" dir="ltr" placeholder="example@domain.com" style="width:100%;padding:8px;margin-top:4px;border:1px solid #b0bec5;border-radius:6px;font-size:14px;box-sizing:border-box">' +
+    '<div id="msg-email-row" style="margin-top:12px">' +
+    '<label style="font-size:13px;font-weight:600;color:#1a3a5c">נמען — כתובת אימייל:</label>' +
+    '<div id="msg-party-pills" style="margin:6px 0;min-height:24px;font-size:12px;color:#888">טוען פרטי צדדים...</div>' +
+    '<input id="msg-to-email" type="email" dir="ltr" placeholder="example@domain.com" style="width:100%;padding:8px;margin-top:2px;border:1px solid #b0bec5;border-radius:6px;font-size:14px;box-sizing:border-box">' +
     '</div>' +
     '<div style="margin-top:12px;text-align:center">' +
     '<button id="msg-send-btn" onclick="sendMessage()" style="padding:10px 32px;background:#1a3a5c;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;font-weight:600">📨 שלח הודעה</button>' +
@@ -688,6 +689,36 @@ function renderMsgTab() {
   document.getElementById('msg-text').value = allTemplates[0].text;
   window._msgTemplates = allTemplates;
   window._msgSelectedIdx = 0;
+
+  // Auto-load party emails from Shira
+  if (selectedCase) {
+    const fileId = selectedCase.fileId || selectedCase.fileMainId;
+    fetch(`${PROXY}/api/side-contacts/${fileId}`)
+      .then(r => r.json())
+      .then(parties => {
+        window._msgParties = parties;
+        const pills = document.getElementById('msg-party-pills');
+        if (!pills) return;
+        if (!parties.length) { pills.textContent = 'לא נמצאו צדדים עם מייל בתיק'; return; }
+        pills.innerHTML = parties.map(p => {
+          const name = (p.firstName + ' ' + p.lastName).trim() || 'צד';
+          const email = p.email || '';
+          const disabled = !email;
+          const style = disabled
+            ? 'padding:3px 10px;margin:2px;border-radius:12px;border:1px solid #ccc;background:#f5f5f5;color:#aaa;font-size:12px;cursor:default'
+            : 'padding:3px 10px;margin:2px;border-radius:12px;border:1px solid #1a3a5c;background:#e8eef5;color:#1a3a5c;font-size:12px;cursor:pointer';
+          const title = email ? email : 'אין מייל בשירה';
+          return `<button style="${style}" title="${title}" ${disabled ? 'disabled' : `onclick="document.getElementById('msg-to-email').value='${email}';this.style.background='#1a3a5c';this.style.color='#fff'"`}>${name}${email ? '' : ' ✗'}</button>`;
+        }).join('');
+      })
+      .catch(() => {
+        const pills = document.getElementById('msg-party-pills');
+        if (pills) pills.textContent = 'שגיאה בטעינת פרטי צדדים';
+      });
+  } else {
+    const pills = document.getElementById('msg-party-pills');
+    if (pills) pills.textContent = '';
+  }
 }
 
 function selectMsgTemplate(idx) {
@@ -711,8 +742,7 @@ function saveMsgTemplate() {
 }
 
 function msgModeChanged() {
-  const mode = document.querySelector('input[name="msg-send-mode"]:checked').value;
-  document.getElementById('msg-email-row').style.display = (mode === 'b') ? 'block' : 'none';
+  // email row is always visible; nothing to toggle
 }
 
 async function sendMessage() {
