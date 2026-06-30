@@ -1,0 +1,3 @@
+config.json
+recordings/*.py
+!recordings/.gitkeep
