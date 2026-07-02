@@ -28,6 +28,30 @@ from .models import Hearing
 
 TIME_RE = re.compile(r"\b(\d{1,2}:\d{2})\b")
 
+# פורמט שורת דיון ביומן DayPilot של שירה, למשל:
+#   עיון - 1597286/1, תיק ארכיב, משה אסף, מרים אסף /דהן (21:00 - 21:15) מספר תיקים בדיון: 1
+ROW_RE = re.compile(
+    r"^(?P<kind>.+?)\s*-\s*(?P<case>[\d/.-]+)\s*,\s*(?P<rest>.+?)\s*"
+    r"\(\s*(?P<start>\d{1,2}:\d{2})\s*-\s*(?P<end>\d{1,2}:\d{2})\s*\)"
+)
+
+
+def parse_row_text(text: str, today: str) -> Hearing | None:
+    """מפענח שורת דיון אחת מהיומן; מחזיר None אם הטקסט אינו שורת דיון."""
+    m = ROW_RE.search(text.strip())
+    if not m:
+        return None
+    rest = [s.strip() for s in m.group("rest").split(",") if s.strip()]
+    kind = m.group("kind").strip()
+    title = f"{kind} - {rest[0]}" if rest else kind
+    return Hearing(
+        date=today,
+        time=m.group("start"),
+        case_number=m.group("case"),
+        case_title=title,
+        parties=rest[1:],
+    )
+
 
 def _open_calendar(p, cfg: dict, headless: bool):
     shira = cfg["shira"]
@@ -55,9 +79,22 @@ def fetch_today(cfg: dict, headless: bool = True) -> list[Hearing]:
     hearings = []
     with sync_playwright() as p:
         context, page = _open_calendar(p, cfg, headless)
-        page.wait_for_selector(sel["hearing_row"], timeout=60_000)
+        try:
+            page.wait_for_selector(sel["hearing_row"], timeout=30_000)
+        except PlaywrightError:
+            context.close()
+            return []  # יום בלי דיונים - היומן פשוט ריק
 
         for row in page.query_selector_all(sel["hearing_row"]):
+            if not sel.get("case_number"):
+                # מצב "שורה משולבת": כל פרטי הדיון בטקסט אחד (יומן DayPilot).
+                # הטקסט הפנימי עדיף על מאפיין title - שמות עם גרשיים (") קוטעים אותו.
+                text = row.inner_text().strip() or (row.get_attribute("title") or "")
+                hearing = parse_row_text(text, today)
+                if hearing:
+                    hearings.append(hearing)
+                continue
+
             def text_of(key: str) -> str:
                 el = row.query_selector(sel[key]) if sel.get(key) else None
                 return el.inner_text().strip() if el else ""
@@ -75,7 +112,13 @@ def fetch_today(cfg: dict, headless: bool = True) -> list[Hearing]:
             ))
         context.close()
 
-    return [h for h in hearings if h.case_number]
+    seen: set[str] = set()
+    unique = []
+    for h in hearings:
+        if h.case_number and h.id not in seen:
+            seen.add(h.id)
+            unique.append(h)
+    return unique
 
 
 def calibrate(cfg: dict) -> None:
