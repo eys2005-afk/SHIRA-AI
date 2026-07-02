@@ -19,7 +19,7 @@ from datetime import date
 from pathlib import Path
 
 import requests
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from .config import load_config
 from .models import Hearing
@@ -174,22 +174,41 @@ def calibrate(cfg: dict) -> None:
         context, page = client._open(p, headless=False)
         print()
         print("נפתח דפדפן על Verbit. התחבר אם צריך, ופתח את המסך שבו קובעים דיון חדש.")
+        print("חשוב: אל תסגור את חלון הדפדפן! השאר אותו פתוח על המסך הזה.")
         input("כשהמסך מוצג - חזור לכאן ולחץ Enter... ")
-        stamp = date.today().isoformat()
-        png = out_dir / f"verbit-{stamp}.png"
-        html = out_dir / f"verbit-{stamp}.html"
-        page.screenshot(path=str(png), full_page=True)
-        html.write_text(page.content(), encoding="utf-8")
+        try:
+            # אם המשתמש פתח טאב חדש וסגר את המקורי - ניקח את הטאב האחרון שפתוח
+            open_pages = [pg for pg in context.pages if not pg.is_closed()]
+            if not open_pages:
+                raise PlaywrightError("no open pages")
+            page = open_pages[-1]
+
+            stamp = date.today().isoformat()
+            png = out_dir / f"verbit-{stamp}.png"
+            html = out_dir / f"verbit-{stamp}.html"
+            page.screenshot(path=str(png), full_page=True)
+            html.write_text(page.content(), encoding="utf-8")
+        except PlaywrightError:
+            raise RuntimeError(
+                "חלון הדפדפן נסגר לפני השמירה. הרץ שוב את הכיול, והשאר את "
+                "הדפדפן פתוח על המסך עד שמופיעה כאן ההודעה 'נשמר'."
+            ) from None
         print(f"\nנשמר: {png}\nנשמר: {html}")
         print("שלח את הקבצים ל-Claude למילוי ה-selectors של Verbit ב-config.yaml.")
         context.close()
 
 
 if __name__ == "__main__":
+    import sys
+
     parser = argparse.ArgumentParser(description="כיול מסכי Verbit")
     parser.add_argument("--calibrate", action="store_true")
     args = parser.parse_args()
     if args.calibrate:
-        calibrate(load_config())
+        try:
+            calibrate(load_config())
+        except RuntimeError as e:
+            print(f"שגיאה: {e}", file=sys.stderr)
+            sys.exit(1)
     else:
         parser.print_help()

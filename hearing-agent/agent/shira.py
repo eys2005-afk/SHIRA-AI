@@ -21,7 +21,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from .config import load_config
 from .models import Hearing
@@ -87,13 +87,26 @@ def calibrate(cfg: dict) -> None:
         context, page = _open_calendar(p, cfg, headless=False)
         print()
         print("נפתח דפדפן. נווט בו אל יומן הדיונים של היום (התחבר אם צריך).")
+        print("חשוב: אל תסגור את חלון הדפדפן! השאר אותו פתוח על מסך היומן.")
         input("כשהמסך מציג את רשימת הדיונים - חזור לכאן ולחץ Enter... ")
 
-        stamp = date.today().isoformat()
-        png = out_dir / f"shira-{stamp}.png"
-        html = out_dir / f"shira-{stamp}.html"
-        page.screenshot(path=str(png), full_page=True)
-        html.write_text(page.content(), encoding="utf-8")
+        try:
+            # אם המשתמש פתח טאב חדש וסגר את המקורי - ניקח את הטאב האחרון שפתוח
+            open_pages = [pg for pg in context.pages if not pg.is_closed()]
+            if not open_pages:
+                raise PlaywrightError("no open pages")
+            page = open_pages[-1]
+
+            stamp = date.today().isoformat()
+            png = out_dir / f"shira-{stamp}.png"
+            html = out_dir / f"shira-{stamp}.html"
+            page.screenshot(path=str(png), full_page=True)
+            html.write_text(page.content(), encoding="utf-8")
+        except PlaywrightError:
+            raise RuntimeError(
+                "חלון הדפדפן נסגר לפני השמירה. הרץ שוב את הכיול, והשאר את "
+                "הדפדפן פתוח על מסך היומן עד שמופיעה כאן ההודעה 'נשמר'."
+            ) from None
         print(f"\nנשמר: {png}\nנשמר: {html}")
         print("שלח את שני הקבצים האלה ל-Claude כדי למלא את ה-selectors ב-config.yaml.")
         print(f"וכן עדכן ב-config.yaml את הכתובת הנוכחית: {page.url}")
