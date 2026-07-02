@@ -64,12 +64,12 @@ def _recording_action(hearing_id: str, action: str):
         try:
             client = get_client(cfg)
             if action == "start":
-                client.start_recording(hearing)
+                message = client.start_recording(hearing)
                 store.update(hearing_id, status="recording", error="")
             else:
-                client.stop_recording(hearing)
+                message = client.stop_recording(hearing)
                 store.update(hearing_id, status="done", error="")
-            return jsonify({"ok": True})
+            return jsonify({"ok": True, "message": message})
         except Exception as e:  # noqa: BLE001
             store.update(hearing_id, status="error", error=str(e))
             return jsonify({"ok": False, "error": str(e)}), 500

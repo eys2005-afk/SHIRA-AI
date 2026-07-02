@@ -1,12 +1,20 @@
 """קביעת דיונים והפעלת הקלטות ב-Verbit.
 
+זרימת ההקלטה (כפי שהיא נעשית ידנית ביומן ההזמנות של Verbit):
+
+  1. פותחים את היומן (orders.verbit.co) ולוחצים על הדיון.
+  2. בחלון שנפתח: Actions -> Edit transcript. נפתח עורך התמלול (trax.verbit.co).
+  3. בעורך מוסיפים את הדוברים בצד ימין (בית הדין, הבעל, האשה, ב"כ...).
+  4. לוחצים על כפתור ההקלטה האדום.
+
+חשוב: ההקלטה נעשית דרך המיקרופון של הדפדפן, ולכן הדפדפן חייב להישאר
+פתוח כל זמן שההקלטה רצה. החיבור נשמר ברמת המחלקה בין בקשות הדשבורד,
+ונסגר רק בעצירת ההקלטה.
+
 שני מימושים מאחורי אותו ממשק, נבחרים לפי verbit.mode ב-config.yaml:
 
-  BrowserVerbit - אוטומציה של ממשק הווב של Verbit (ברירת המחדל).
-                  משתמש בפרופיל דפדפן קבוע כך שההתחברות נשמרת בין ריצות.
-  ApiVerbit     - עבודה מול ה-API של Verbit. ניסיון אינטגרציה קודם (במייל)
-                  לא צלח, ולכן זה כבוי עד שנאמת מול Verbit את הכתובות
-                  והפורמט; המבנה כאן מוכן כדי שהמעבר יהיה החלפת mode בלבד.
+  BrowserVerbit - אוטומציה של ממשק הווב (ברירת המחדל).
+  ApiVerbit     - עבודה מול ה-API של Verbit; כבוי עד שיתקבל תיעוד ומפתח.
 
 כמו בשירה, יש מצב כיול:
 
@@ -45,6 +53,10 @@ def participants_for(hearing: Hearing, cfg: dict) -> list[str]:
 
 
 class BrowserVerbit:
+    # הקלטות פעילות: hearing_id -> (playwright, context). הדפדפן נשאר פתוח
+    # כל זמן שההקלטה רצה (המיקרופון מוקלט דרכו) ונסגר רק בעצירה.
+    _active: dict = {}
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.vcfg = cfg["verbit"]
@@ -55,24 +67,28 @@ class BrowserVerbit:
         if missing:
             raise RuntimeError(
                 f"ה-selectors הבאים של Verbit ריקים ב-config.yaml: {', '.join(missing)}. "
-                "הרץ: python -m agent.verbit --calibrate (ראה README)."
+                "צריך להשלים אותם בכיול (ראה README)."
             )
 
-    def _open(self, p, url: str | None = None, headless: bool = True):
+    def _launch(self, p, headless: bool = True):
         context = p.chromium.launch_persistent_context(
             self.vcfg["profile_dir"],
             channel=self.cfg["shira"].get("browser_channel", "msedge"),
             headless=headless,
         )
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto(url or self.vcfg["base_url"], wait_until="domcontentloaded")
         return context, page
 
     def schedule(self, hearing: Hearing) -> Hearing:
-        """יוצר דיון חדש ב-Verbit עבור הדיון הנתון."""
+        """יוצר דיון חדש ביומן Verbit עבור הדיון הנתון.
+
+        טרם כויל: צריך לתעד איך נקבע דיון חדש ביומן (New session? Duplicate?).
+        עד אז הקריאה נכשלת עם הודעה ברורה ולא מנחשת.
+        """
         self._require_selectors("new_session_button", "session_name_input", "save_button")
         with sync_playwright() as p:
-            context, page = self._open(p)
+            context, page = self._launch(p)
+            page.goto(self.vcfg["base_url"], wait_until="domcontentloaded")
             page.click(self.sel["new_session_button"])
             page.fill(self.sel["session_name_input"], session_name_for(hearing))
             if self.sel.get("session_time_input"):
@@ -83,27 +99,101 @@ class BrowserVerbit:
                     page.keyboard.press("Enter")
             page.click(self.sel["save_button"])
             page.wait_for_load_state("networkidle")
-            # הכתובת אחרי השמירה היא בדרך כלל דף הדיון עצמו - נשמרת כדי
-            # שכפתור ההפעלה בדשבורד יגיע ישירות לדיון הנכון.
             hearing.verbit_url = page.url
             context.close()
         hearing.status = "scheduled"
         return hearing
 
-    def _click_in_session(self, hearing: Hearing, selector_key: str) -> None:
-        self._require_selectors(selector_key)
-        if not hearing.verbit_url:
-            raise RuntimeError("לדיון אין קישור Verbit שמור - קבע אותו קודם (רענון בוקר).")
+    def _open_editor(self, context, page, hearing: Hearing):
+        """מיומן ההזמנות אל עורך התמלול של הדיון (Actions -> Edit transcript)."""
+        page.goto(self.vcfg["base_url"], wait_until="domcontentloaded")
+        # הדיון מופיע ביומן עם מספר התיק בשם - לוחצים עליו לפתיחת החלון
+        page.click(f"text={hearing.case_number}", timeout=30_000)
+        page.click(self.sel["actions_button"], timeout=15_000)
+        try:
+            # Edit transcript נפתח בדרך כלל בטאב חדש
+            with context.expect_page(timeout=15_000) as new_page:
+                page.click(self.sel["edit_transcript_item"], timeout=15_000)
+            editor = new_page.value
+        except PlaywrightError:
+            editor = page  # נפתח באותו טאב
+        editor.wait_for_load_state("domcontentloaded")
+        return editor
+
+    def start_recording(self, hearing: Hearing) -> str:
+        """פותח את עורך התמלול, מוסיף את הדוברים ומפעיל את ההקלטה.
+
+        מחזיר הודעה למשתמש; הדפדפן נשאר פתוח כל זמן שההקלטה רצה.
+        """
+        self._require_selectors(
+            "actions_button", "edit_transcript_item",
+            "speaker_name_input", "add_speaker_button",
+        )
+        if BrowserVerbit._active:
+            raise RuntimeError("כבר יש הקלטה פעילה - עצור אותה לפני שמתחילים חדשה.")
+
+        pw = sync_playwright().start()
+        try:
+            context, page = self._launch(pw, headless=False)
+            editor = self._open_editor(context, page, hearing)
+
+            for speaker in self.vcfg.get("speakers", []):
+                editor.fill(self.sel["speaker_name_input"], speaker)
+                editor.click(self.sel["add_speaker_button"])
+
+            record_sel = self.sel.get("record_button")
+            if record_sel:
+                editor.click(record_sel, timeout=15_000)
+                message = "ההקלטה החלה."
+            else:
+                # כפתור ההקלטה טרם כויל - העורך נשאר פתוח להפעלה ידנית
+                message = (
+                    "העורך נפתח והדוברים נוספו - לחץ על כפתור ההקלטה האדום בעצמך "
+                    "(כפתור ההקלטה טרם כויל אוטומטית)."
+                )
+            BrowserVerbit._active[hearing.id] = (pw, context)
+            return message
+        except Exception:
+            pw.stop()
+            raise
+
+    def stop_recording(self, hearing: Hearing) -> str:
+        """עוצר את ההקלטה וסוגר את הדפדפן ששמור מההפעלה."""
+        held = BrowserVerbit._active.pop(hearing.id, None)
+        if held:
+            pw, context = held
+            try:
+                clicked = False
+                for pg in reversed([p for p in context.pages if not p.is_closed()]):
+                    try:
+                        pg.click(self.sel["stop_recording_button"], timeout=10_000)
+                        clicked = True
+                        break
+                    except PlaywrightError:
+                        continue
+                if not clicked:
+                    raise RuntimeError(
+                        "לא נמצא כפתור 'Stop recording' בדפדפן הפתוח - "
+                        "עצור את ההקלטה ידנית לפני סגירת החלון."
+                    )
+            finally:
+                try:
+                    context.close()
+                except PlaywrightError:
+                    pass
+                pw.stop()
+            return "ההקלטה נעצרה."
+
+        # אין דפדפן שמור (למשל אחרי הפעלה ידנית או ריסטארט לדשבורד) -
+        # נפתח את העורך מחדש ונעצור שם
+        self._require_selectors("actions_button", "edit_transcript_item",
+                                "stop_recording_button")
         with sync_playwright() as p:
-            context, page = self._open(p, url=hearing.verbit_url)
-            page.click(self.sel[selector_key], timeout=30_000)
+            context, page = self._launch(p, headless=False)
+            editor = self._open_editor(context, page, hearing)
+            editor.click(self.sel["stop_recording_button"], timeout=30_000)
             context.close()
-
-    def start_recording(self, hearing: Hearing) -> None:
-        self._click_in_session(hearing, "start_recording_button")
-
-    def stop_recording(self, hearing: Hearing) -> None:
-        self._click_in_session(hearing, "stop_recording_button")
+        return "ההקלטה נעצרה."
 
 
 class ApiVerbit:
@@ -144,19 +234,21 @@ class ApiVerbit:
         hearing.status = "scheduled"
         return hearing
 
-    def start_recording(self, hearing: Hearing) -> None:
+    def start_recording(self, hearing: Hearing) -> str:
         resp = requests.post(
             f"{self.base_url}/sessions/{hearing.verbit_session_id}/start",  # TODO: לאמת
             headers=self._headers(), timeout=30,
         )
         resp.raise_for_status()
+        return "ההקלטה החלה."
 
-    def stop_recording(self, hearing: Hearing) -> None:
+    def stop_recording(self, hearing: Hearing) -> str:
         resp = requests.post(
             f"{self.base_url}/sessions/{hearing.verbit_session_id}/stop",  # TODO: לאמת
             headers=self._headers(), timeout=30,
         )
         resp.raise_for_status()
+        return "ההקלטה נעצרה."
 
 
 def get_client(cfg: dict):
@@ -171,10 +263,12 @@ def calibrate(cfg: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     client = BrowserVerbit(cfg)
     with sync_playwright() as p:
-        context, page = client._open(p, headless=False)
+        context, page = client._launch(p, headless=False)
+        page.goto(client.vcfg["base_url"], wait_until="domcontentloaded")
         print()
-        print("נפתח דפדפן על Verbit. התחבר אם צריך, ופתח את המסך שבו קובעים דיון חדש.")
-        print("חשוב: אל תסגור את חלון הדפדפן! השאר אותו פתוח על המסך הזה.")
+        print("נפתח דפדפן על Verbit. התחבר אם צריך, והגע למסך שרוצים לצלם")
+        print("(יומן ההזמנות / עורך התמלול / מסך קביעת דיון).")
+        print("חשוב: אל תסגור את חלון הדפדפן! השאר אותו פתוח על המסך.")
         input("כשהמסך מוצג - חזור לכאן ולחץ Enter... ")
         try:
             # אם המשתמש פתח טאב חדש וסגר את המקורי - ניקח את הטאב האחרון שפתוח
