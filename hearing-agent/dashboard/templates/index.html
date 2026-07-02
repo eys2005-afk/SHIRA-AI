@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>דיוני היום - {{ day }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>דיוני היום</h1>
+    <div class="day">{{ day }}</div>
+    <button id="refresh-btn" class="refresh" onclick="refresh()">&#x21bb; רענון מהיומן</button>
+  </header>
+
+  <main id="hearings">
+    <div class="empty">טוען...</div>
+  </main>
+
+  <div id="toast"></div>
+
+<script>
+const STATUS_LABELS = {
+  pending:   "ממתין לקביעה",
+  scheduled: "מוכן להקלטה",
+  recording: "מקליט עכשיו",
+  done:      "הסתיים",
+  error:     "שגיאה",
+};
+
+let busy = false;
+
+function toast(msg, isError) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.className = isError ? "show error" : "show";
+  setTimeout(() => { el.className = ""; }, 5000);
+}
+
+function card(h) {
+  const parties = h.parties && h.parties.length
+    ? `<div class="parties">${h.parties.join(" &middot; ")}</div>` : "";
+  const err = h.status === "error" && h.error
+    ? `<div class="error-text">${h.error}</div>` : "";
+  const verbitLink = h.verbit_url
+    ? `<a class="verbit-link" href="${h.verbit_url}" target="_blank">פתח ב-Verbit</a>` : "";
+
+  let button = "";
+  if (h.status === "scheduled" || h.status === "error") {
+    button = `<button class="action start" onclick="act('${h.id}','start')">&#9654; התחל הקלטה</button>`;
+  } else if (h.status === "recording") {
+    button = `<button class="action stop" onclick="act('${h.id}','stop')">&#9632; עצור הקלטה</button>`;
+  }
+
+  return `
+  <div class="card status-${h.status}">
+    <div class="time">${h.time || "--:--"}</div>
+    <div class="details">
+      <div class="case">${h.case_number} ${h.case_title ? "&mdash; " + h.case_title : ""}</div>
+      ${parties}
+      <span class="badge ${h.status}">${STATUS_LABELS[h.status] || h.status}</span>
+      ${verbitLink}
+      ${err}
+    </div>
+    <div class="actions">${button}</div>
+  </div>`;
+}
+
+async function load() {
+  const res = await fetch("/api/hearings");
+  const hearings = await res.json();
+  const el = document.getElementById("hearings");
+  el.innerHTML = hearings.length
+    ? hearings.map(card).join("")
+    : `<div class="empty">אין דיונים בקובץ היום.<br>לחץ "רענון מהיומן" כדי למשוך אותם משירה.</div>`;
+}
+
+async function act(id, action) {
+  if (busy) return;
+  busy = true;
+  toast(action === "start" ? "מפעיל הקלטה..." : "עוצר הקלטה...");
+  try {
+    const res = await fetch(`/api/${action}/${id}`, { method: "POST" });
+    const data = await res.json();
+    if (data.ok) toast(action === "start" ? "ההקלטה הופעלה" : "ההקלטה נעצרה");
+    else toast("נכשל: " + (data.error || ""), true);
+  } catch (e) {
+    toast("שגיאת תקשורת: " + e, true);
+  }
+  busy = false;
+  load();
+}
+
+async function refresh() {
+  if (busy) return;
+  busy = true;
+  const btn = document.getElementById("refresh-btn");
+  btn.disabled = true;
+  toast("קורא את היומן משירה וקובע דיונים ב-Verbit... זה עשוי לקחת דקה-שתיים");
+  try {
+    const res = await fetch("/api/refresh", { method: "POST" });
+    const data = await res.json();
+    if (data.ok) toast("היומן עודכן");
+    else toast("הרענון נכשל: " + (data.error || ""), true);
+  } catch (e) {
+    toast("שגיאת תקשורת: " + e, true);
+  }
+  btn.disabled = false;
+  busy = false;
+  load();
+}
+
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+# ==========================================================================
+# הגדרות הסוכן - יומן דיונים (שירה) -> הקלטות (Verbit)
+#
+# הקובץ הזה הוא "לוח הבקרה" של הסוכן. כל מה שתלוי במסכים של שירה ושל
+# Verbit (כתובות, selectors) מרוכז כאן, כדי שכיול מול המערכות האמיתיות
+# לא ידרוש שינוי קוד - רק עדכון של הקובץ הזה.
+#
+# שדות שמסומנים TODO חייבים להיות מושלמים בכיול על מחשב העבודה
+# (ראה README - "שלב הכיול").
+# ==========================================================================
+
+shira:
+  # TODO: הכתובת המדויקת של יומן הדיונים בשירה (העתק מהדפדפן בעבודה)
+  calendar_url: "https://shira.example.court.gov.il/calendar"
+
+  # הדפדפן שדרכו שירה מזוהה אוטומטית. הסוכן מריץ עותק של אותו דפדפן עם
+  # פרופיל קבוע משלו, כך שההזדהות האוטומטית (SSO ארגוני) נשמרת בין ריצות.
+  browser_channel: "msedge"        # msedge או chrome
+  profile_dir: "~/.hearing-agent/shira-profile"
+
+  # ה-selectors של רשימת הדיונים ביומן. מושלמים בשלב הכיול:
+  # מריצים `python -m agent.shira --calibrate` ושולחים לי את הקבצים
+  # שנשמרים ב-data/calibration/ - ואני ממלא את הערכים כאן.
+  selectors:
+    hearing_row: ""                # TODO: שורת דיון אחת ביומן
+    case_number: ""                # TODO: מספר התיק בתוך השורה
+    case_title: ""                 # TODO: שם/כותרת התיק
+    hearing_time: ""               # TODO: שעת הדיון
+    parties: ""                    # TODO: הצדדים/גורמים בדיון (אם מוצג ביומן)
+
+verbit:
+  # איך הסוכן מדבר עם Verbit:
+  #   api     - דרך ה-API שלהם (הדרך האמינה; דורש מפתח - ראה README)
+  #   browser - אוטומציה של ממשק הווב (ברירת מחדל עד שה-API יעבוד)
+  mode: "browser"
+
+  # --- מצב browser ---
+  base_url: "https://users.verbit.co"   # TODO: לאמת שזו הכתובת שבה אתה משתמש
+  profile_dir: "~/.hearing-agent/verbit-profile"
+  selectors:
+    new_session_button: ""         # TODO: כפתור "דיון חדש" / New Session
+    session_name_input: ""         # TODO: שדה שם הדיון
+    session_time_input: ""         # TODO: שדה שעת הדיון
+    participant_input: ""          # TODO: שדה הוספת משתתף
+    save_button: ""                # TODO: כפתור שמירה
+    start_recording_button: ""     # TODO: כפתור התחלת הקלטה בתוך דיון
+    stop_recording_button: ""      # TODO: כפתור עצירת הקלטה
+
+  # --- מצב api ---
+  api:
+    base_url: ""                   # TODO: כתובת ה-API (מהתיעוד/התמיכה של Verbit)
+    # המפתח עצמו נשמר ב-.env (VERBIT_API_TOKEN), לא כאן.
+
+# גורמים קבועים שמצורפים לכל דיון, בנוסף לצדדים שנקראים מהיומן של אותו יום.
+# אפשר להשאיר ריק אם הכול נגזר מהיומן.
+fixed_participants:
+  - name: ""                       # למשל: שם הדיין/שופט
+    role: ""                       # למשל: אב בית הדין
+  # - name: ""
+  #   role: "קלדנית"
+
+dashboard:
+  host: "127.0.0.1"                # מקומי בלבד - לא נגיש מבחוץ
+  port: 8765
+
+storage:
+  data_dir: "data"                 # שם נשמרים קבצי היום, לוגים וצילומי כיול

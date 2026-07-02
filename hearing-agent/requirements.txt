@@ -1,0 +1,7 @@
+flask
+playwright
+pyyaml
+python-dotenv
+requests
+# לשלב ג' (השוואת פרוטוקול-תמלול) בלבד:
+# anthropic
