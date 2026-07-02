@@ -82,7 +82,7 @@ async function act(id, action) {
   try {
     const res = await fetch(`/api/${action}/${id}`, { method: "POST" });
     const data = await res.json();
-    if (data.ok) toast(action === "start" ? "ההקלטה הופעלה" : "ההקלטה נעצרה");
+    if (data.ok) toast(data.message || (action === "start" ? "ההקלטה הופעלה" : "ההקלטה נעצרה"));
     else toast("נכשל: " + (data.error || ""), true);
   } catch (e) {
     toast("שגיאת תקשורת: " + e, true);

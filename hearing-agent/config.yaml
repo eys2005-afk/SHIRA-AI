@@ -18,15 +18,15 @@ shira:
   browser_channel: "msedge"        # msedge או chrome
   profile_dir: "~/.hearing-agent/shira-profile"
 
-  # ה-selectors של רשימת הדיונים ביומן. מושלמים בשלב הכיול:
-  # מריצים `python -m agent.shira --calibrate` ושולחים לי את הקבצים
-  # שנשמרים ב-data/calibration/ - ואני ממלא את הערכים כאן.
+  # היומן הוא רכיב DayPilot: כל דיון הוא div עם מאפיין title שמכיל את כל
+  # הפרטים בשורה אחת ("עיון - 1597286/1, תיק ארכיב, פלוני, אלמונית (21:00 - 21:15)...").
+  # לכן רק hearing_row מוגדר, והשאר ריקים בכוונה - הפרטים מפוענחים מהטקסט.
   selectors:
-    hearing_row: ""                # TODO: שורת דיון אחת ביומן
-    case_number: ""                # TODO: מספר התיק בתוך השורה
-    case_title: ""                 # TODO: שם/כותרת התיק
-    hearing_time: ""               # TODO: שעת הדיון
-    parties: ""                    # TODO: הצדדים/גורמים בדיון (אם מוצג ביומן)
+    hearing_row: "#DayPilotCalendar1_events div[title]"
+    case_number: ""                # ריק בכוונה - מפוענח מתוך שורת ה-title
+    case_title: ""                 # ריק בכוונה
+    hearing_time: ""               # ריק בכוונה
+    parties: ""                    # ריק בכוונה
 
 verbit:
   # איך הסוכן מדבר עם Verbit:
@@ -35,16 +35,32 @@ verbit:
   mode: "browser"
 
   # --- מצב browser ---
-  base_url: "https://users.verbit.co"   # TODO: לאמת שזו הכתובת שבה אתה משתמש
+  base_url: "https://orders.verbit.co/orders"
   profile_dir: "~/.hearing-agent/verbit-profile"
+
+  # הדוברים שמוסיפים בעורך התמלול לפני כל הקלטה (בסדר הזה)
+  speakers:
+    - "בית הדין"
+    - "הבעל"
+    - "האשה"
+    - 'ב"כ הבעל'
+    - 'ב"כ האשה'
+
   selectors:
-    new_session_button: ""         # TODO: כפתור "דיון חדש" / New Session
-    session_name_input: ""         # TODO: שדה שם הדיון
-    session_time_input: ""         # TODO: שדה שעת הדיון
-    participant_input: ""          # TODO: שדה הוספת משתתף
-    save_button: ""                # TODO: כפתור שמירה
-    start_recording_button: ""     # TODO: כפתור התחלת הקלטה בתוך דיון
-    stop_recording_button: ""      # TODO: כפתור עצירת הקלטה
+    # זרימת ההקלטה: לחיצה על הדיון ביומן -> Actions -> Edit transcript
+    actions_button: 'button:has-text("Actions")'
+    edit_transcript_item: 'text=Edit transcript'
+    # עורך התמלול (trax.verbit.co): הוספת דוברים והפעלת הקלטה
+    speaker_name_input: 'input[placeholder="Type a Name"]'
+    add_speaker_button: 'button:has-text("Add Speaker")'
+    record_button: ""              # TODO: הכפתור האדום - דורש HTML של העורך
+    stop_recording_button: 'button:has-text("Stop recording")'
+    # קביעת דיון חדש ביומן - טרם כויל (איך נוצר דיון חדש? New session? Duplicate?)
+    new_session_button: ""         # TODO
+    session_name_input: ""         # TODO
+    session_time_input: ""         # TODO
+    participant_input: ""          # TODO
+    save_button: ""                # TODO
 
   # --- מצב api ---
   api:
