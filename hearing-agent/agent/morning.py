@@ -29,6 +29,13 @@ def run_morning(headless: bool = True) -> list:
     print(f"נמצאו {len(hearings)} דיונים להיום.")
 
     client = get_client(cfg)
+    ok, reason = client.can_schedule()
+    if not ok:
+        # מצב ביניים: היומן נקרא ומוצג בדשבורד, אבל בלי קביעה אוטומטית
+        print(f"מדלג על קביעה ב-Verbit: {reason}.")
+        print("הדיונים יוצגו בדשבורד; קבע אותם ב-Verbit ידנית בינתיים.")
+        return store.load()
+
     for h in hearings:
         if h.status != "pending":
             continue

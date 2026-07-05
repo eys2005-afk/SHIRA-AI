@@ -62,6 +62,17 @@ class BrowserVerbit:
         self.vcfg = cfg["verbit"]
         self.sel = self.vcfg["selectors"]
 
+    def can_schedule(self) -> tuple[bool, str]:
+        """האם קביעת דיונים כוילה כבר? מחזיר (כן/לא, הסבר)."""
+        missing = [k for k in ("new_session_button", "session_name_input", "save_button")
+                   if not self.sel.get(k)]
+        if missing:
+            return False, (
+                "קביעת דיונים ב-Verbit עדיין לא כוילה "
+                f"(selectors חסרים: {', '.join(missing)})"
+            )
+        return True, ""
+
     def _require_selectors(self, *keys: str) -> None:
         missing = [k for k in keys if not self.sel.get(k)]
         if missing:
@@ -212,6 +223,9 @@ class ApiVerbit:
                 "מצב api דורש verbit.api.base_url ב-config.yaml ו-VERBIT_API_TOKEN ב-.env."
             )
         self.cfg = cfg
+
+    def can_schedule(self) -> tuple[bool, str]:
+        return True, ""
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}

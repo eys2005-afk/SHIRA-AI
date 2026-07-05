@@ -21,7 +21,7 @@
 
 <script>
 const STATUS_LABELS = {
-  pending:   "ממתין לקביעה",
+  pending:   "מהיומן (לא נקבע אוטומטית)",
   scheduled: "מוכן להקלטה",
   recording: "מקליט עכשיו",
   done:      "הסתיים",
@@ -46,7 +46,7 @@ function card(h) {
     ? `<a class="verbit-link" href="${h.verbit_url}" target="_blank">פתח ב-Verbit</a>` : "";
 
   let button = "";
-  if (h.status === "scheduled" || h.status === "error") {
+  if (h.status === "pending" || h.status === "scheduled" || h.status === "error") {
     button = `<button class="action start" onclick="act('${h.id}','start')">&#9654; התחל הקלטה</button>`;
   } else if (h.status === "recording") {
     button = `<button class="action stop" onclick="act('${h.id}','stop')">&#9632; עצור הקלטה</button>`;
