@@ -29,6 +29,7 @@ from pathlib import Path
 import requests
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
+from .browser import launch_persistent_context
 from .config import load_config
 from .models import Hearing
 
@@ -82,7 +83,8 @@ class BrowserVerbit:
             )
 
     def _launch(self, p, headless: bool = True):
-        context = p.chromium.launch_persistent_context(
+        context = launch_persistent_context(
+            p,
             self.vcfg["profile_dir"],
             channel=self.cfg["shira"].get("browser_channel", "msedge"),
             headless=headless,

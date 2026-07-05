@@ -15,7 +15,10 @@ shira:
 
   # הדפדפן שדרכו שירה מזוהה אוטומטית. הסוכן מריץ עותק של אותו דפדפן עם
   # פרופיל קבוע משלו, כך שההזדהות האוטומטית (SSO ארגוני) נשמרת בין ריצות.
-  browser_channel: "msedge"        # msedge או chrome
+  # msedge / chrome - דפדפן ממותג עם SSO ארגוני (מומלץ). אם הוא לא מותקן
+  # הסוכן ינסה אוטומטית את הממותג השני. "chromium" (או ריק) = ה-Chromium
+  # המצורף ל-Playwright, בלי הזדהות SSO - לבדיקות מקומיות בלבד.
+  browser_channel: "msedge"
   profile_dir: "~/.hearing-agent/shira-profile"
 
   # היומן הוא רכיב DayPilot: כל דיון הוא div עם מאפיין title שמכיל את כל

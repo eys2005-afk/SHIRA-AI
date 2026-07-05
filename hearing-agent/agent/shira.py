@@ -23,6 +23,7 @@ from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
+from .browser import launch_persistent_context
 from .config import load_config
 from .models import Hearing
 
@@ -55,7 +56,8 @@ def parse_row_text(text: str, today: str) -> Hearing | None:
 
 def _open_calendar(p, cfg: dict, headless: bool):
     shira = cfg["shira"]
-    context = p.chromium.launch_persistent_context(
+    context = launch_persistent_context(
+        p,
         shira["profile_dir"],
         channel=shira.get("browser_channel", "msedge"),
         headless=headless,
