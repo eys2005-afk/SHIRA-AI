@@ -287,29 +287,36 @@ def calibrate(cfg: dict) -> None:
         context, page = client._launch(p, headless=False)
         page.goto(client.vcfg["base_url"], wait_until="domcontentloaded")
         print()
-        print("נפתח דפדפן על Verbit. התחבר אם צריך, והגע למסך שרוצים לצלם")
-        print("(יומן ההזמנות / עורך התמלול / מסך קביעת דיון).")
+        print("נפתח דפדפן על Verbit. התחבר אם צריך, והגע למסך קביעת דיון חדש")
+        print("(המסך עם שדות השם/השעה וכפתור השמירה).")
         print("חשוב: אל תסגור את חלון הדפדפן! השאר אותו פתוח על המסך.")
         input("כשהמסך מוצג - חזור לכאן ולחץ Enter... ")
-        try:
-            # אם המשתמש פתח טאב חדש וסגר את המקורי - ניקח את הטאב האחרון שפתוח
-            open_pages = [pg for pg in context.pages if not pg.is_closed()]
-            if not open_pages:
-                raise PlaywrightError("no open pages")
-            page = open_pages[-1]
 
-            stamp = date.today().isoformat()
-            png = out_dir / f"verbit-{stamp}.png"
-            html = out_dir / f"verbit-{stamp}.html"
-            page.screenshot(path=str(png), full_page=True)
-            html.write_text(page.content(), encoding="utf-8")
-        except PlaywrightError:
+        # שומרים את כל הטאבים הפתוחים (אם מסך "דיון חדש" נפתח בטאב נפרד -
+        # כך נלכד גם הוא וגם רשימת ההזמנות עם הכפתור, בפעם אחת).
+        open_pages = [pg for pg in context.pages if not pg.is_closed()]
+        stamp = date.today().isoformat()
+        saved = []
+        for i, pg in enumerate(open_pages, 1):
+            suffix = f"-{i}" if len(open_pages) > 1 else ""
+            png = out_dir / f"verbit-{stamp}{suffix}.png"
+            html = out_dir / f"verbit-{stamp}{suffix}.html"
+            try:
+                pg.screenshot(path=str(png), full_page=True)
+                html.write_text(pg.content(), encoding="utf-8")
+                saved.append((pg.url, png, html))
+            except PlaywrightError:
+                continue  # טאב שנסגר תוך כדי - מדלגים עליו
+
+        if not saved:
             raise RuntimeError(
                 "חלון הדפדפן נסגר לפני השמירה. הרץ שוב את הכיול, והשאר את "
                 "הדפדפן פתוח על המסך עד שמופיעה כאן ההודעה 'נשמר'."
-            ) from None
-        print(f"\nנשמר: {png}\nנשמר: {html}")
-        print("שלח את הקבצים ל-Claude למילוי ה-selectors של Verbit ב-config.yaml.")
+            )
+
+        for url, png, html in saved:
+            print(f"\nנשמר: {png}\nנשמר: {html}\n  (מתוך: {url})")
+        print("\nשלח את כל הקבצים האלה ל-Claude למילוי ה-selectors ב-config.yaml.")
         context.close()
 
 
