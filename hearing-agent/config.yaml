@@ -56,6 +56,16 @@ verbit:
     - 'ב"כ הבעל'
     - 'ב"כ האשה'
 
+  # קביעת דיון חדש - מסך "New live order" של Verbit (כפתור "Place new order").
+  # הערכים כאן ממלאים את השדות הנדרשים בטופס; ה-selectors עצמם מקודדים
+  # ב-agent/verbit.py לפי תוויות הטופס (Session name / Input language וכו').
+  scheduling:
+    enabled: true                  # false = הדשבורד רק יציג דיונים בלי לקבוע
+    input_language: "Hebrew"       # שדה חובה בטופס Verbit
+    output_language: "Hebrew"      # שדה חובה בטופס Verbit
+    default_duration_minutes: 60   # אורך דיון כשאין שעת סיום ביומן
+    add_parties_as_terms: true     # לרשום את צדדי הדיון בשדה Terms (עזר לתמלול)
+
   selectors:
     # זרימת ההקלטה: לחיצה על הדיון ביומן -> Actions -> Edit transcript
     actions_button: 'button:has-text("Actions")'

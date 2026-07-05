@@ -15,8 +15,9 @@ STATUSES = ("pending", "scheduled", "recording", "done", "error")
 @dataclass
 class Hearing:
     date: str                       # YYYY-MM-DD
-    time: str                       # HH:MM כפי שמופיע ביומן
+    time: str                       # HH:MM שעת ההתחלה כפי שמופיע ביומן
     case_number: str
+    end_time: str = ""              # HH:MM שעת הסיום (אם מופיעה ביומן)
     case_title: str = ""
     parties: list = field(default_factory=list)
     status: str = "pending"

@@ -23,7 +23,7 @@
 """
 
 import argparse
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -41,6 +41,26 @@ def session_name_for(hearing: Hearing) -> str:
         parts.append(hearing.case_title)
     parts.append(hearing.time)
     return " - ".join(p for p in parts if p)
+
+
+def _verbit_date(iso_date: str) -> str:
+    """YYYY-MM-DD -> 'Mon DD, YY' (הפורמט שמוצג בשדה Date של Verbit)."""
+    try:
+        return datetime.strptime(iso_date, "%Y-%m-%d").strftime("%b %d, %y")
+    except ValueError:
+        return iso_date
+
+
+def _end_time_for(hearing: Hearing, sched: dict) -> str:
+    """שעת הסיום לטופס: מהיומן אם קיימת, אחרת התחלה + משך ברירת מחדל."""
+    if hearing.end_time:
+        return hearing.end_time
+    try:
+        start = datetime.strptime(hearing.time, "%H:%M")
+        minutes = int(sched.get("default_duration_minutes", 60))
+        return (start + timedelta(minutes=minutes)).strftime("%H:%M")
+    except (ValueError, TypeError):
+        return hearing.time
 
 
 def participants_for(hearing: Hearing, cfg: dict) -> list[str]:
@@ -64,14 +84,9 @@ class BrowserVerbit:
         self.sel = self.vcfg["selectors"]
 
     def can_schedule(self) -> tuple[bool, str]:
-        """האם קביעת דיונים כוילה כבר? מחזיר (כן/לא, הסבר)."""
-        missing = [k for k in ("new_session_button", "session_name_input", "save_button")
-                   if not self.sel.get(k)]
-        if missing:
-            return False, (
-                "קביעת דיונים ב-Verbit עדיין לא כוילה "
-                f"(selectors חסרים: {', '.join(missing)})"
-            )
+        """האם קביעה אוטומטית ב-Verbit מופעלת? מחזיר (כן/לא, הסבר)."""
+        if not self.vcfg.get("scheduling", {}).get("enabled", False):
+            return False, "קביעה אוטומטית ב-Verbit כבויה (verbit.scheduling.enabled=false)"
         return True, ""
 
     def _require_selectors(self, *keys: str) -> None:
@@ -97,30 +112,121 @@ class BrowserVerbit:
         page = context.pages[0] if context.pages else context.new_page()
         return context, page
 
-    def schedule(self, hearing: Hearing) -> Hearing:
-        """יוצר דיון חדש ביומן Verbit עבור הדיון הנתון.
+    def schedule(self, hearing: Hearing, headless: bool = False) -> Hearing:
+        """קובע דיון חדש בטופס 'New live order' של Verbit.
 
-        טרם כויל: צריך לתעד איך נקבע דיון חדש ביומן (New session? Duplicate?).
-        עד אז הקריאה נכשלת עם הודעה ברורה ולא מנחשת.
+        פותח את "Place new order", ממלא את שדות החובה (שם הדיון, שפת קלט/פלט,
+        תאריך + שעות ההתחלה והסיום) ולוחץ "Place session". רץ בדפדפן גלוי
+        כברירת מחדל - כדי שאפשר לצפות ולהשלים כניסה בפעם הראשונה.
+
+        אם שדה כלשהו לא נמצא, נשמרים צילום מסך ו-HTML של הטופס תחת
+        data/calibration/schedule-error-*, והשגיאה מפנה אליהם - כדי שאפשר
+        יהיה לתקן את ה-selector המדויק בלי לנחש.
         """
-        self._require_selectors("new_session_button", "session_name_input", "save_button")
+        sched = self.vcfg.get("scheduling", {})
         with sync_playwright() as p:
-            context, page = self._launch(p)
-            page.goto(self.vcfg["base_url"], wait_until="domcontentloaded")
-            page.click(self.sel["new_session_button"])
-            page.fill(self.sel["session_name_input"], session_name_for(hearing))
-            if self.sel.get("session_time_input"):
-                page.fill(self.sel["session_time_input"], hearing.time)
-            if self.sel.get("participant_input"):
-                for participant in participants_for(hearing, self.cfg):
-                    page.fill(self.sel["participant_input"], participant)
-                    page.keyboard.press("Enter")
-            page.click(self.sel["save_button"])
-            page.wait_for_load_state("networkidle")
-            hearing.verbit_url = page.url
-            context.close()
+            context, page = self._launch(p, headless=headless)
+            try:
+                page.goto(self.vcfg["base_url"], wait_until="domcontentloaded")
+
+                self._step(page, "פתיחת Place new order", lambda:
+                    page.get_by_role("button", name="Place new order").click(timeout=30_000))
+                page.wait_for_load_state("domcontentloaded")
+
+                self._step(page, "שם הדיון (Session name)", lambda:
+                    self._fill_field(page, "Session name", session_name_for(hearing)))
+
+                self._step(page, "שפת קלט (Input language)", lambda:
+                    self._select_dropdown(page, "Input language",
+                                          sched.get("input_language", "Hebrew")))
+                self._step(page, "שפת פלט (Output language)", lambda:
+                    self._select_dropdown(page, "Output language",
+                                          sched.get("output_language", "Hebrew")))
+
+                self._step(page, "בחירת Schedule for later", lambda:
+                    page.get_by_text("Schedule for later", exact=False).first.click())
+                self._step(page, "תאריך (Date)", lambda:
+                    self._fill_field(page, "Date", _verbit_date(hearing.date)))
+                self._step(page, "שעת התחלה (Start time)", lambda:
+                    self._fill_field(page, "Start time", hearing.time))
+                self._step(page, "שעת סיום (End time)", lambda:
+                    self._fill_field(page, "End time", _end_time_for(hearing, sched)))
+
+                if sched.get("add_parties_as_terms", True):
+                    terms = ", ".join(participants_for(hearing, self.cfg))
+                    if terms:
+                        try:
+                            self._fill_field(page, "Terms", terms)
+                        except PlaywrightError:
+                            pass  # שדה עזר בלבד - לא מפילים על זה את הקביעה
+
+                self._step(page, "שליחה (Place session)", lambda:
+                    page.get_by_role("button", name="Place session").click(timeout=15_000))
+                page.wait_for_load_state("networkidle")
+                hearing.verbit_url = page.url
+            finally:
+                context.close()
         hearing.status = "scheduled"
         return hearing
+
+    def _step(self, page, description: str, action) -> None:
+        """מריץ שלב בטופס; אם נכשל - שומר צילום/HTML ומעלה שגיאה מפנה."""
+        try:
+            action()
+        except PlaywrightError as e:
+            path = self._debug_dump(page, description)
+            first_line = str(e).splitlines()[0] if str(e) else ""
+            raise RuntimeError(
+                f"קביעת הדיון נכשלה בשלב '{description}'. נשמרו צילום מסך ו-HTML "
+                f"של הטופס ב: {path} - שלח אותם ל-Claude להתאמת ה-selector. ({first_line})"
+            ) from e
+
+    def _fill_field(self, page, label: str, value: str) -> None:
+        """ממלא שדה טקסט לפי התווית שלו, עם נפילות חלופיות."""
+        candidates = (
+            page.get_by_label(label, exact=False),
+            page.get_by_placeholder(label, exact=False),
+            page.locator(
+                f"xpath=//*[normalize-space(text())='{label}']"
+                "/following::input[1] | "
+                f"//*[normalize-space(text())='{label}']/following::textarea[1]"
+            ),
+        )
+        for locator in candidates:
+            try:
+                locator.first.fill(value, timeout=6_000)
+                return
+            except PlaywrightError:
+                continue
+        raise PlaywrightError(f"no fillable field for label {label!r}")
+
+    def _select_dropdown(self, page, label: str, value: str) -> None:
+        """פותח dropdown לפי התווית ובוחר אפשרות לפי טקסט (react-select וכד')."""
+        try:
+            page.get_by_label(label, exact=False).first.click(timeout=6_000)
+        except PlaywrightError:
+            page.locator(
+                f"xpath=//*[normalize-space(text())='{label}']/following::*[self::input or "
+                "self::div or self::button][1]"
+            ).first.click(timeout=6_000)
+        try:
+            page.keyboard.type(value)  # סינון ברשימות עם חיפוש
+        except PlaywrightError:
+            pass
+        page.get_by_role("option", name=value, exact=False).first.click(timeout=6_000)
+
+    def _debug_dump(self, page, tag: str) -> str:
+        """שומר צילום מסך + HTML של המצב הנוכחי לצורך תיקון selector."""
+        out_dir = Path(self.cfg["storage"]["data_dir"]) / "calibration"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe = "".join(c if c.isalnum() else "_" for c in tag)[:30]
+        base = out_dir / f"schedule-error-{date.today().isoformat()}-{safe}"
+        try:
+            page.screenshot(path=str(base) + ".png", full_page=True)
+            Path(str(base) + ".html").write_text(page.content(), encoding="utf-8")
+        except PlaywrightError:
+            pass
+        return str(base) + ".png"
 
     def _open_editor(self, context, page, hearing: Hearing):
         """מיומן ההזמנות אל עורך התמלול של הדיון (Actions -> Edit transcript)."""
@@ -320,17 +426,48 @@ def calibrate(cfg: dict) -> None:
         context.close()
 
 
+def _schedule_test(cfg: dict) -> None:
+    """בדיקה: קובע ב-Verbit את הדיון הראשון שעדיין לא נקבע מקובץ היום.
+
+    אם קובץ היום ריק, קורא קודם את היומן משירה - כך שאפשר להריץ את הבדיקה
+    בפקודה אחת בלי לפתוח את הדשבורד.
+    """
+    from .shira import fetch_today
+    from .store import DayStore
+
+    store = DayStore(cfg["storage"]["data_dir"])
+    hearings = store.load()
+    if not hearings:
+        print("קובץ היום ריק - קורא את היומן משירה...")
+        hearings = store.merge(fetch_today(cfg, headless=True))
+        print(f"נמצאו {len(hearings)} דיונים.")
+    hearing = next((h for h in hearings if h.status in ("pending", "error")), None)
+    if hearing is None:
+        print("אין דיון להיום שממתין לקביעה.")
+        return
+    print(f"קובע ב-Verbit לבדיקה: {hearing.time} {hearing.case_number} "
+          f"{hearing.case_title} ...")
+    client = BrowserVerbit(cfg)
+    client.schedule(hearing, headless=False)
+    store.update(hearing.id, status="scheduled", verbit_url=hearing.verbit_url, error="")
+    print(f"נקבע בהצלחה. קישור: {hearing.verbit_url or '(לא נלכד)'}")
+
+
 if __name__ == "__main__":
     import sys
 
-    parser = argparse.ArgumentParser(description="כיול מסכי Verbit")
-    parser.add_argument("--calibrate", action="store_true")
+    parser = argparse.ArgumentParser(description="Verbit: כיול מסכים ובדיקת קביעת דיון")
+    parser.add_argument("--calibrate", action="store_true", help="שמירת צילום/HTML של מסך Verbit")
+    parser.add_argument("--schedule-test", action="store_true",
+                        help="קביעת הדיון הראשון מקובץ היום ב-Verbit (דפדפן גלוי)")
     args = parser.parse_args()
-    if args.calibrate:
-        try:
+    try:
+        if args.calibrate:
             calibrate(load_config())
-        except RuntimeError as e:
-            print(f"שגיאה: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        parser.print_help()
+        elif args.schedule_test:
+            _schedule_test(load_config())
+        else:
+            parser.print_help()
+    except RuntimeError as e:
+        print(f"שגיאה: {e}", file=sys.stderr)
+        sys.exit(1)

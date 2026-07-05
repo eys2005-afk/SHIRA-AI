@@ -48,6 +48,7 @@ def parse_row_text(text: str, today: str) -> Hearing | None:
     return Hearing(
         date=today,
         time=m.group("start"),
+        end_time=m.group("end"),
         case_number=m.group("case"),
         case_title=title,
         parties=rest[1:],
