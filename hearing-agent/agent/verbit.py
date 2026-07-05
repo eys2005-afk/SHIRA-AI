@@ -83,10 +83,15 @@ class BrowserVerbit:
             )
 
     def _launch(self, p, headless: bool = True):
+        # Verbit מזדהה עם סיסמה (לא SSO), ולכן ברירת המחדל היא Chromium
+        # מבודד - חלון משלו שלא מתנגש ב-Edge הרגיל של המשתמש (הריצה ב-Edge
+        # במקביל לדפדפן פתוח גרמה לחלון הסוכן להיסגר מיד). אפשר לעקוף עם
+        # verbit.browser_channel ב-config.yaml.
+        channel = self.vcfg.get("browser_channel") or "chromium"
         context = launch_persistent_context(
             p,
             self.vcfg["profile_dir"],
-            channel=self.cfg["shira"].get("browser_channel", "msedge"),
+            channel=channel,
             headless=headless,
         )
         page = context.pages[0] if context.pages else context.new_page()

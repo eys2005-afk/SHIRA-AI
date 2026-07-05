@@ -41,6 +41,13 @@ verbit:
   base_url: "https://orders.verbit.co/orders"
   profile_dir: "~/.hearing-agent/verbit-profile"
 
+  # Verbit מזדהה עם סיסמה (לא SSO ארגוני), ולכן הוא רץ ב-Chromium המצורף
+  # ל-Playwright - חלון מבודד משלו שלא מתנגש ב-Edge הרגיל שלך (הרצה ב-Edge
+  # במקביל לדפדפן פתוח סגרה מיד את חלון הסוכן). הרץ פעם אחת:
+  #   python -m playwright install chromium
+  # אם בכל זאת רוצים דפדפן ממותג - הגדר כאן "msedge" או "chrome".
+  browser_channel: "chromium"
+
   # הדוברים שמוסיפים בעורך התמלול לפני כל הקלטה (בסדר הזה)
   speakers:
     - "בית הדין"
