@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<title>מסמך מערכת ShiraAI — בתי הדין הרבניים</title>
+<style>
+  body { font-family: Arial, sans-serif; font-size: 14px; line-height: 1.8; padding: 40px; max-width: 900px; margin: auto; color: #222; }
+  h1 { font-size: 22px; border-bottom: 3px solid #1a3a5c; padding-bottom: 8px; color: #1a3a5c; }
+  h2 { font-size: 17px; color: #1a3a5c; margin-top: 30px; border-right: 4px solid #1a3a5c; padding-right: 10px; }
+  h3 { font-size: 15px; color: #333; margin-top: 20px; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+  th { background: #1a3a5c; color: white; padding: 8px 12px; text-align: right; }
+  td { padding: 8px 12px; border-bottom: 1px solid #ddd; }
+  tr:nth-child(even) { background: #f7f9fc; }
+  .ok { color: green; font-weight: bold; }
+  .warn { color: #e65100; font-weight: bold; }
+  .future { background: #e8f5e9; border-right: 4px solid #4caf50; padding: 10px 14px; margin: 10px 0; border-radius: 4px; }
+  .note { background: #fff8e1; border-right: 4px solid #ffc107; padding: 10px 14px; margin: 10px 0; border-radius: 4px; }
+  .section { margin-bottom: 30px; }
+  .tag { display: inline-block; background: #e3f2fd; color: #1565c0; border-radius: 4px; padding: 2px 8px; font-size: 12px; margin: 2px; }
+</style>
+</head>
+<body>
+
+<h1>מסמך מערכת ShiraAI — בתי הדין הרבניים</h1>
+<p style="color:#888;font-size:12px">נכון לתאריך: יוני 2026 | גרסה נוכחית: 2.4</p>
+
+<div class="section">
+<h2>1. סקירה כללית</h2>
+<p>
+ShiraAI היא מערכת עזר חכמה לדיינים ולצוות בית הדין הרבני, הפועלת על גבי מערכת שירה הקיימת.
+המערכת מאפשרת לאנשי צוות בית הדין לחפש תיקים, לעיין במסמכים, ולקבל סיוע AI לניסוח החלטות ולסיכום תיקים —
+הכל בממשק עברי ידידותי הפועל ישירות בדפדפן.
+</p>
+</div>
+
+<div class="section">
+<h2>2. ארכיטקטורת המערכת</h2>
+
+<h3>רכיבים עיקריים</h3>
+<table>
+  <tr><th>רכיב</th><th>תיאור</th><th>טכנולוגיה</th></tr>
+  <tr><td>שרת מקומי</td><td>פועל על כל מחשב בנפרד, מתווך בין הדפדפן לשירה ול-Gemini</td><td>Python + Flask</td></tr>
+  <tr><td>ממשק משתמש</td><td>אפליקציית דפדפן בעברית — חיפוש תיקים, מסמכים, AI</td><td>HTML + JavaScript (מוטמע בשרת)</td></tr>
+  <tr><td>מנוע AI</td><td>Gemini 2.5 Flash של Google — מקבל מסמכי תיק ומחזיר ניתוח</td><td>Gemini API</td></tr>
+  <tr><td>מקור נתונים</td><td>מערכת שירה — תיקים, מסמכים, דיונים</td><td>SOAP/REST API פנימי</td></tr>
+  <tr><td>קובץ הפעלה</td><td>EXE עצמאי לא דורש התקנת Python</td><td>PyInstaller</td></tr>
+</table>
+
+<h3>זרימת נתונים</h3>
+<table>
+  <tr><th>שלב</th><th>תיאור</th></tr>
+  <tr><td>1</td><td>המשתמש פותח את ShiraAI.exe במחשב שלו</td></tr>
+  <tr><td>2</td><td>השרת המקומי עולה על port 5050</td></tr>
+  <tr><td>3</td><td>הדפדפן נפתח אוטומטית עם ממשק המערכת</td></tr>
+  <tr><td>4</td><td>המשתמש מחפש תיק — השרת מושך נתונים ממערכת שירה</td></tr>
+  <tr><td>5</td><td>המשתמש בוחר מסמכים ושולח לניתוח AI</td></tr>
+  <tr><td>6</td><td>השרת מסנן פרטים מזהים ושולח ל-Gemini</td></tr>
+  <tr><td>7</td><td>Gemini מחזיר ניתוח — מוצג בממשק</td></tr>
+</table>
+</div>
+
+<div class="section">
+<h2>3. פונקציונליות קיימת</h2>
+<table>
+  <tr><th>פונקציה</th><th>סטטוס</th></tr>
+  <tr><td>חיפוש תיקים לפי מספר תיק</td><td><span class="ok">✓ פעיל</span></td></tr>
+  <tr><td>חיפוש תיקים לפי שם</td><td><span class="ok">✓ פעיל</span></td></tr>
+  <tr><td>חיפוש לפי ת"ז</td><td><span class="ok">✓ פעיל</span></td></tr>
+  <tr><td>עיון ברשימת מסמכי תיק</td><td><span class="ok">✓ פעיל</span></td></tr>
+  <tr><td>קריאת PDF ו-Word ושליחה ל-AI</td><td><span class="ok">✓ פעיל</span></td></tr>
+  <tr><td>ניסוח החלטה על בסיס פרוטוקול דיון</td><td><span class="ok">✓ פעיל</span></td></tr>
+  <tr><td>סיכום תיק ויצוא ל-Word</td><td><span class="ok">✓ פעיל</span></td></tr>
+  <tr><td>חיפוש מילה בתוך מסמכי תיק</td><td><span class="ok">✓ פעיל</span></td></tr>
+  <tr><td>סינון פרטים מזהים לפני שליחה ל-AI</td><td><span class="ok">✓ פעיל (ת"ז, טלפון, מייל, שמות צדדים, מס' תיק)</span></td></tr>
+  <tr><td>עדכון אוטומטי של גרסה חדשה</td><td><span class="ok">✓ פעיל — דרך שרת פנימי 10.67.4.32</span></td></tr>
+  <tr><td>הגבלת תוצאות לבית הדין של המשתמש</td><td><span class="ok">✓ פעיל</span></td></tr>
+  <tr><td>לוג שימוש (tokens, עלות)</td><td><span class="ok">✓ פעיל — usage_log.jsonl</span></td></tr>
+</table>
+</div>
+
+<div class="section">
+<h2>4. אבטחה ופרטיות</h2>
+
+<h3>מה נשלח ל-Gemini</h3>
+<div class="note">
+Gemini מקבל את <strong>תוכן המסמכים בלבד</strong> — ללא פרטים מזהים. לפני כל שליחה, השרת המקומי מבצע:
+</div>
+<table>
+  <tr><th>פרט</th><th>טיפול</th></tr>
+  <tr><td>שם צד א (תובע/ת)</td><td><span class="ok">מוחלף ב"צד א"</span></td></tr>
+  <tr><td>שם צד ב (נתבע/ת)</td><td><span class="ok">מוחלף ב"צד ב"</span></td></tr>
+  <tr><td>מספר תיק</td><td><span class="ok">מוחלף ב"[תיק]"</span></td></tr>
+  <tr><td>מספר תעודת זהות (9 ספרות)</td><td><span class="ok">מוחלף ב"[תז]"</span></td></tr>
+  <tr><td>מספר טלפון</td><td><span class="ok">מוחלף ב"[טלפון]"</span></td></tr>
+  <tr><td>כתובת מייל</td><td><span class="ok">מוחלף ב"[מייל]"</span></td></tr>
+</table>
+
+<h3>מה לא עובר לרשת</h3>
+<ul>
+  <li>כל הנתונים ממערכת שירה עוברים דרך הרשת הפנימית בלבד</li>
+  <li>ה-EXE פועל מקומית — אין שרת חיצוני ברשת</li>
+  <li>מפתח ה-API (GEMINI_API_KEY) נשמר מקומית בלבד — לא מועלה ל-GitHub</li>
+</ul>
+</div>
+
+<div class="section">
+<h2>5. מנגנון עדכון גרסאות</h2>
+<p>
+כל מחשב בודק אוטומטית אחת לכמה דקות האם קיימת גרסה חדשה מול שרת פנימי (<code>10.67.4.32:8081</code>).
+אם קיים עדכון — מוצג באנר כתום בממשק. לחיצה על "התקן עכשיו" מורידה את ה-EXE החדש,
+מחליפה את הקובץ הנוכחי, ומפעילה מחדש את האפליקציה — ללא צורך בהתערבות מנהל IT.
+</p>
+<table>
+  <tr><th>שלב</th><th>אחריות</th></tr>
+  <tr><td>בניית EXE חדש</td><td>מנהל המערכת — מריץ BUILD.bat</td></tr>
+  <tr><td>פרסום הגרסה</td><td>מנהל המערכת — מריץ PUBLISH.bat (שרת על 10.67.4.32)</td></tr>
+  <tr><td>הורדת עדכון</td><td>אוטומטי — המשתמש לוחץ על הבאנר</td></tr>
+</table>
+</div>
+
+<div class="section">
+<h2>6. פיתוחים מומלצים לעתיד</h2>
+
+<div class="future">
+<strong>א. שרת מרכזי במקום EXE על כל מחשב</strong><br>
+במקום להפעיל שרת Python על כל מחשב בנפרד, להפעיל שרת אחד מרכזי בתוך הרשת הפנימית של בית הדין.
+כל המשתמשים מתחברים אליו דרך הדפדפן. יתרונות: עדכון במקום אחד, ניהול מרכזי, פחות תחזוקה.
+</div>
+
+<div class="future">
+<strong>ב. אימות משתמשים (SSO)</strong><br>
+שילוב עם חשבון הרשת הארגונית (Active Directory) — המשתמש מתחבר עם שם משתמש וסיסמה ארגוניים,
+ללא צורך בסיסמת מפתח נפרדת. כולל הרשאות לפי תפקיד (דיין, מזכיר, רשם).
+</div>
+
+<div class="future">
+<strong>ג. מאגר שאלות ותשובות פנימי</strong><br>
+שמירת שאלות ותשובות קודמות (ללא פרטים מזהים) — כדי לספק תשובות עקביות יותר לאורך זמן
+וללמוד מהשימוש בפועל.
+</div>
+
+<div class="future">
+<strong>ד. ניתוח עומס תיקים ודוחות ניהוליים</strong><br>
+על בסיס לוג השימוש הקיים — הפקת דוחות כמה שאלות נשאלו, אילו תיקים טופלו, זמני תגובה,
+עלות חודשית — לשימוש הנהלת בית הדין.
+</div>
+
+<div class="future">
+<strong>ה. העלאת מסמכים ידנית (לבחינה)</strong><br>
+אפשרות למשתמש להעלות מסמך מהמחשב — כגון טיוטה, מכתב חיצוני או מסמך שלא הועלה לשירה —
+ולקבל עליו ניתוח AI. כיום המערכת מושכת מסמכים מתוך שירה בלבד.
+</div>
+</div>
+
+<div class="section">
+<h2>7. תשתית טכנית נדרשת</h2>
+<table>
+  <tr><th>רכיב</th><th>דרישה</th></tr>
+  <tr><td>מחשבי משתמשים (כיום)</td><td>Windows 10/11, גישה לרשת הפנימית</td></tr>
+  <tr><td>שרת עדכונים</td><td>מחשב עם כתובת IP קבועה 10.67.4.32, Python מותקן</td></tr>
+  <tr><td>גישה לאינטרנט</td><td>נדרשת לצורך שליחה ל-Gemini API בלבד</td></tr>
+  <tr><td>Proxy ארגוני</td><td>192.168.174.80:8080 — מוגדר במערכת</td></tr>
+  <tr><td>מפתח API של Gemini</td><td>חשבון Google Cloud עם גישה ל-Gemini 2.5 Flash</td></tr>
+</table>
+</div>
+
+<hr>
+<p style="color:#888;font-size:12px;text-align:center">מסמך זה הופק אוטומטית על ידי Claude Code | ShiraAI v2.4 | יוני 2026</p>
+
+</body>
+</html>
