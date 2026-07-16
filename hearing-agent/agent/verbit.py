@@ -150,8 +150,9 @@ class BrowserVerbit:
 
                 self._step(page, "פתיחת Place new order", lambda:
                     page.get_by_role("button", name="Place new order").click(timeout=30_000))
-                page.locator("input[data-is-editable-input='true']").first.wait_for(
-                    state="attached", timeout=20_000)
+                # ממתינים שהטופס יסיים להיטען (רכיב שם הדיון גלוי) - הרינדור משתנה בקצב
+                page.locator(".verbit-editable__preview").first.wait_for(
+                    state="visible", timeout=30_000)
 
                 # שם הדיון - רכיב verbit-editable: input מוסתר מאחורי preview שלוחצים עליו
                 self._step(page, "שם הדיון (Session name)", lambda:
@@ -253,9 +254,11 @@ class BrowserVerbit:
 
     def _fill_session_name(self, page, value: str) -> None:
         """ממלא את 'Session name' - input מוסתר ברכיב verbit-editable."""
-        page.locator(".verbit-editable__preview").first.click(timeout=6_000)
+        preview = page.locator(".verbit-editable__preview").first
+        preview.wait_for(state="visible", timeout=15_000)
+        preview.click(timeout=12_000)
         inp = page.locator("input[data-is-editable-input='true']").first
-        inp.fill(value, timeout=6_000)
+        inp.fill(value, timeout=8_000)
         inp.press("Tab")  # יציאה ממצב עריכה ואישור הערך
 
     def _select_react(self, page, aria_label: str, value: str) -> None:
