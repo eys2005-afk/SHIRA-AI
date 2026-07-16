@@ -52,18 +52,19 @@ def _verbit_date(iso_date: str) -> str:
 
 
 def _time_candidates(hhmm: str) -> list[str]:
-    """פורמטים אפשריים של שעה לבחירה ב-Verbit (24 שעות ו-12 שעות AM/PM)."""
+    """פורמטים אפשריים של שעה. Verbit משתמש ב-'09:00am' (12 שעות, am/pm קטן,
+    בלי רווח, שעה בת שתי ספרות); שאר הפורמטים הם נפילות ביטחון."""
     try:
         h24, m = (int(x) for x in hhmm.split(":"))
     except (ValueError, AttributeError):
         return [hhmm]
     h12 = h24 % 12 or 12
-    ampm = "AM" if h24 < 12 else "PM"
+    lo = "am" if h24 < 12 else "pm"
     return [
-        f"{h24:02d}:{m:02d}",       # 09:00
-        f"{h12}:{m:02d} {ampm}",    # 9:00 AM
-        f"{h12:02d}:{m:02d} {ampm}",  # 09:00 AM
-        f"{h24}:{m:02d}",           # 9:00
+        f"{h12:02d}:{m:02d}{lo}",       # 09:00am  <- הפורמט של Verbit
+        f"{h12}:{m:02d}{lo}",           # 9:00am
+        f"{h12:02d}:{m:02d} {lo.upper()}",  # 09:00 AM
+        f"{h24:02d}:{m:02d}",           # 09:00
     ]
 
 
