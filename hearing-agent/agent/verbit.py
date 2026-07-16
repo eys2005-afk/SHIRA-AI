@@ -189,7 +189,16 @@ class BrowserVerbit:
 
                 self._step(page, "שליחה (Place session)", lambda:
                     page.get_by_role("button", name="Place session").click(timeout=15_000))
-                page.wait_for_load_state("networkidle")
+
+                # ודא שההזמנה באמת נוצרה - אחרת נשארים בטופס עם שגיאות ולידציה
+                page.wait_for_timeout(4_000)
+                if self._still_on_create_form(page):
+                    invalid = self._invalid_fields(page)
+                    path = self._debug_dump(page, "after-submit-not-created")
+                    raise RuntimeError(
+                        "נלחץ 'Place session' אך ההזמנה לא נוצרה - נשארנו בטופס. "
+                        f"שדות עם שגיאה: {invalid or '(לא זוהו)'} . צילום/HTML: {path}"
+                    )
                 hearing.verbit_url = page.url
             finally:
                 context.close()
@@ -280,6 +289,36 @@ class BrowserVerbit:
         inp.click(timeout=6_000)
         inp.fill(value, timeout=6_000)
         inp.press("Enter")
+
+    def _still_on_create_form(self, page) -> bool:
+        """האם עדיין על טופס יצירת ההזמנה (כלומר השליחה לא עברה)?"""
+        if "create_live_order" in page.url or "/create" in page.url:
+            return True
+        try:
+            return page.get_by_role("button", name="Place session").first.is_visible()
+        except PlaywrightError:
+            return False
+
+    def _invalid_fields(self, page) -> str:
+        """שמות השדות שסומנו כשגויים (aria-invalid) + הודעות שגיאה גלויות."""
+        found = []
+        try:
+            loc = page.locator("[aria-invalid='true']")
+            for i in range(min(loc.count(), 15)):
+                el = loc.nth(i)
+                name = (el.get_attribute("aria-label") or el.get_attribute("id")
+                        or el.get_attribute("name"))
+                if name:
+                    found.append(name)
+        except PlaywrightError:
+            pass
+        try:
+            errs = page.get_by_text("required field", exact=False)
+            if errs.count():
+                found.append(f"({errs.count()} 'required field')")
+        except PlaywrightError:
+            pass
+        return ", ".join(dict.fromkeys(found))  # ייחודי, בסדר הופעה
 
     def _debug_dump(self, page, tag: str) -> str:
         """שומר צילום מסך + HTML של המצב הנוכחי לצורך תיקון selector."""
@@ -507,7 +546,7 @@ def _login(cfg: dict) -> None:
     print("ההתחברות נשמרה בפרופיל. עכשיו הרץ: python -m agent.verbit --schedule-test")
 
 
-def _schedule_test(cfg: dict) -> None:
+def _schedule_test(cfg: dict, start_time: str | None = None) -> None:
     """בדיקה: קובע ב-Verbit את הדיון הראשון שעדיין לא נקבע מקובץ היום.
 
     אם קובץ היום ריק, קורא קודם את היומן משירה - כך שאפשר להריץ את הבדיקה
@@ -526,6 +565,9 @@ def _schedule_test(cfg: dict) -> None:
     if hearing is None:
         print("אין דיון להיום שממתין לקביעה.")
         return
+    if start_time:
+        hearing.time = start_time     # לצורך בדיקה: שעה מובחנת
+        hearing.end_time = ""         # תחושב מחדש מהמשך ברירת המחדל
     print(f"קובע ב-Verbit לבדיקה: {hearing.time} {hearing.case_number} "
           f"{hearing.case_title} ...")
     client = BrowserVerbit(cfg)
@@ -543,6 +585,8 @@ if __name__ == "__main__":
                         help="התחברות חד-פעמית ל-Verbit (שמירת ההתחברות בפרופיל)")
     parser.add_argument("--schedule-test", action="store_true",
                         help="קביעת הדיון הראשון מקובץ היום ב-Verbit (דפדפן גלוי)")
+    parser.add_argument("--time", metavar="HH:MM", default=None,
+                        help="לבדיקה: לקבוע בשעה מובחנת (משבצות של 15 דקות)")
     args = parser.parse_args()
     try:
         if args.calibrate:
@@ -550,7 +594,7 @@ if __name__ == "__main__":
         elif args.login:
             _login(load_config())
         elif args.schedule_test:
-            _schedule_test(load_config())
+            _schedule_test(load_config(), start_time=args.time)
         else:
             parser.print_help()
     except RuntimeError as e:
