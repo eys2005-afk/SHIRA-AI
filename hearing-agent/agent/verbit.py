@@ -277,22 +277,20 @@ class BrowserVerbit:
         page.get_by_role("option", name=value, exact=False).first.click(timeout=6_000)
 
     def _select_time(self, page, aria_label: str, hhmm: str) -> None:
-        """בוחר שעה ב-react-select; מנסה מספר פורמטים (24 שעות ו-AM/PM)."""
+        """בוחר שעה ב-react-select. הרשימה מסננת תוך כדי הקלדה, ולכן חייבים
+        הקשות מקלדת אמיתיות (press_sequentially) ולא fill; מנסים כמה פורמטים."""
         ctrl = page.get_by_label(aria_label, exact=True).first
-        ctrl.click(timeout=10_000)
         for cand in _time_candidates(hhmm):
+            ctrl.click(timeout=10_000)          # פותח וממקד את השדה
             try:
-                ctrl.fill(cand, timeout=2_000)
+                ctrl.fill("")                   # מנקה טקסט קודם
             except PlaywrightError:
-                page.keyboard.type(cand)
+                pass
+            ctrl.press_sequentially(cand, delay=25)   # הקשות אמיתיות -> סינון
             try:
                 page.get_by_role("option", name=cand, exact=True).first.click(timeout=2_500)
                 return
             except PlaywrightError:
-                try:
-                    ctrl.fill("", timeout=1_000)
-                except PlaywrightError:
-                    pass
                 continue
         raise PlaywrightError(f"no time option matched {hhmm!r}")
 
