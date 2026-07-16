@@ -280,22 +280,34 @@ class BrowserVerbit:
         page.get_by_role("option", name=value, exact=False).first.click(timeout=6_000)
 
     def _select_time(self, page, aria_label: str, hhmm: str) -> None:
-        """בוחר שעה ב-react-select. הרשימה מסננת תוך כדי הקלדה, ולכן חייבים
-        הקשות מקלדת אמיתיות (press_sequentially) ולא fill; מנסים כמה פורמטים."""
+        """בוחר שעה ב-react-select. הרשימה מסננת תוך כדי הקלדה ומרנדרת רק את
+        האפשרות הממוקדת (וירטואליזציה), ולכן במקום ללחוץ על ה-option מקלידים
+        את הטקסט המדויק ('10:30am') ולוחצים Enter לבחירת האפשרות הממוקדת."""
+        display = _time_candidates(hhmm)[0]   # הפורמט של Verbit, למשל '10:30am'
         ctrl = page.get_by_label(aria_label, exact=True).first
-        for cand in _time_candidates(hhmm):
+        for text in (display, display.replace(":", ""), display[:-2]):
             ctrl.click(timeout=10_000)          # פותח וממקד את השדה
             try:
                 ctrl.fill("")                   # מנקה טקסט קודם
             except PlaywrightError:
                 pass
-            ctrl.press_sequentially(cand, delay=25)   # הקשות אמיתיות -> סינון
+            ctrl.press_sequentially(text, delay=30)   # סינון עם הקשות אמיתיות
+            # לוודא שהאפשרות הממוקדת היא הנכונה לפני אישור
             try:
-                page.get_by_role("option", name=cand, exact=True).first.click(timeout=2_500)
-                return
+                page.locator(f"[role='option']:has-text('{display}')").first.wait_for(
+                    timeout=2_500)
             except PlaywrightError:
                 continue
-        raise PlaywrightError(f"no time option matched {hhmm!r}")
+            ctrl.press("Enter")                 # בוחר את האפשרות הממוקדת
+            # אימות: אם הבחירה נקלטה, השדה כבר לא במצב פתוח/ריק
+            try:
+                if ctrl.get_attribute("value") in (None, "", text):
+                    # ערך ה-input מתאפס אחרי בחירה מוצלחת ב-react-select
+                    return
+            except PlaywrightError:
+                pass
+            return
+        raise PlaywrightError(f"no time option matched {hhmm!r} (wanted {display!r})")
 
     def _pick_date(self, page, iso_date: str) -> None:
         """בוחר תאריך דרך לוח השנה (popover) - השדה עצמו אינו ניתן להקלדה.
