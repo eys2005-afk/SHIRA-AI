@@ -259,13 +259,21 @@ class BrowserVerbit:
         inp.press("Tab")  # יציאה ממצב עריכה ואישור הערך
 
     def _select_react(self, page, aria_label: str, value: str) -> None:
-        """פותח react-select לפי ה-aria-label, מסנן לפי טקסט, ובוחר אפשרות."""
-        ctrl = page.get_by_label(aria_label, exact=True).first
-        ctrl.click(timeout=10_000)          # מחכה גם שהשדה יהפוך פעיל (למשל שפת פלט)
+        """בוחר ערך ב-react-select לפי ה-aria-label.
+
+        חלק מהשדות (Audio source, Output language) בנויים עם input נסתר בגודל
+        0 (dummyInput) שאי אפשר ללחוץ עליו - לכן פותחים דרך תיבת ה-control
+        הגלויה, ורק אז מסננים (בשדות עם חיפוש) ובוחרים את האפשרות.
+        """
+        inp = page.get_by_label(aria_label, exact=True).first
+        control = inp.locator(
+            "xpath=ancestor::*[contains(@class,'verbit-select__control')][1]")
+        opener = control if control.count() else inp
+        opener.first.click(timeout=10_000)   # מחכה גם שהשדה יהפוך פעיל (שפת פלט)
         try:
-            ctrl.fill(value, timeout=3_000)
+            inp.fill(value, timeout=2_000)   # שדות עם חיפוש - סינון; אחרת no-op
         except PlaywrightError:
-            page.keyboard.type(value)
+            pass
         page.get_by_role("option", name=value, exact=False).first.click(timeout=6_000)
 
     def _select_time(self, page, aria_label: str, hhmm: str) -> None:
