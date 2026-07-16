@@ -128,6 +128,8 @@ class BrowserVerbit:
             context, page = self._launch(p, headless=headless)
             try:
                 page.goto(self.vcfg["base_url"], wait_until="domcontentloaded")
+                self._require_login(page)
+                self._goto_live_bookings(page)
 
                 self._step(page, "פתיחת Place new order", lambda:
                     page.get_by_role("button", name="Place new order").click(timeout=30_000))
@@ -168,6 +170,35 @@ class BrowserVerbit:
                 context.close()
         hearing.status = "scheduled"
         return hearing
+
+    def _require_login(self, page) -> None:
+        """מוודא שמחוברים ל-Verbit; אחרת עוצר עם הודעה ברורה להריץ --login."""
+        try:
+            page.get_by_role("button", name="Place new order").wait_for(timeout=8_000)
+            return  # מחוברים - הכפתור קיים
+        except PlaywrightError:
+            pass
+        try:
+            page.get_by_role("link", name="Live Bookings").wait_for(timeout=5_000)
+            return  # ניווט ראשי מוצג => מחוברים
+        except PlaywrightError:
+            raise RuntimeError(
+                "לא מחוברים ל-Verbit (מוצג מסך התחברות). הרץ פעם אחת: "
+                "python -m agent.verbit --login , התחבר, ואז הרץ שוב את הקביעה."
+            ) from None
+
+    def _goto_live_bookings(self, page) -> None:
+        """מנווט לעמוד Live Bookings שבו נמצא הכפתור 'Place new order'."""
+        try:
+            page.get_by_role("button", name="Place new order").wait_for(timeout=3_000)
+            return  # כבר על העמוד הנכון
+        except PlaywrightError:
+            pass
+        try:
+            page.get_by_role("link", name="Live Bookings").first.click(timeout=8_000)
+            page.wait_for_load_state("domcontentloaded")
+        except PlaywrightError:
+            pass  # אם אין קישור כזה - ננסה להמשיך מהעמוד הנוכחי
 
     def _step(self, page, description: str, action) -> None:
         """מריץ שלב בטופס; אם נכשל - שומר צילום/HTML ומעלה שגיאה מפנה."""
@@ -426,6 +457,21 @@ def calibrate(cfg: dict) -> None:
         context.close()
 
 
+def _login(cfg: dict) -> None:
+    """פותח את Verbit בפרופיל הקבוע וממתין שתתחבר - כדי לשמור את ההתחברות."""
+    client = BrowserVerbit(cfg)
+    with sync_playwright() as p:
+        context, page = client._launch(p, headless=False)
+        page.goto(client.vcfg["base_url"], wait_until="domcontentloaded")
+        print()
+        print("נפתח דפדפן על Verbit. התחבר עם שם המשתמש והסיסמה,")
+        print("והמתן עד שאתה רואה את מסך ההזמנות (Live Bookings).")
+        print("חשוב: אל תסגור את חלון הדפדפן.")
+        input("כשאתה מחובר ורואה את ההזמנות - חזור לכאן ולחץ Enter... ")
+        context.close()
+    print("ההתחברות נשמרה בפרופיל. עכשיו הרץ: python -m agent.verbit --schedule-test")
+
+
 def _schedule_test(cfg: dict) -> None:
     """בדיקה: קובע ב-Verbit את הדיון הראשון שעדיין לא נקבע מקובץ היום.
 
@@ -458,12 +504,16 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Verbit: כיול מסכים ובדיקת קביעת דיון")
     parser.add_argument("--calibrate", action="store_true", help="שמירת צילום/HTML של מסך Verbit")
+    parser.add_argument("--login", action="store_true",
+                        help="התחברות חד-פעמית ל-Verbit (שמירת ההתחברות בפרופיל)")
     parser.add_argument("--schedule-test", action="store_true",
                         help="קביעת הדיון הראשון מקובץ היום ב-Verbit (דפדפן גלוי)")
     args = parser.parse_args()
     try:
         if args.calibrate:
             calibrate(load_config())
+        elif args.login:
+            _login(load_config())
         elif args.schedule_test:
             _schedule_test(load_config())
         else:
