@@ -157,6 +157,11 @@ class BrowserVerbit:
                 self._step(page, "שם הדיון (Session name)", lambda:
                     self._fill_session_name(page, session_name_for(hearing)))
 
+                # מקור אודיו (Audio source) - שדה react-select חובה
+                self._step(page, "מקור אודיו (Audio source)", lambda:
+                    self._select_react(page, "select media source",
+                                       sched.get("media_source", "Verbit Connect (On-Site)")))
+
                 # שפות - react-select (aria-label האמיתי שונה מהתווית המוצגת)
                 self._step(page, "שפת קלט (Input language)", lambda:
                     self._select_react(page, "select audio language",
@@ -172,7 +177,7 @@ class BrowserVerbit:
                     pass
 
                 self._step(page, "תאריך (Date)", lambda:
-                    self._fill_date(page, _verbit_date(hearing.date)))
+                    self._pick_date(page, hearing.date))
                 self._step(page, "שעת התחלה (Start time)", lambda:
                     self._select_time(page, "pick order start time", hearing.time))
                 self._step(page, "שעת סיום (End time)", lambda:
@@ -283,12 +288,33 @@ class BrowserVerbit:
                 continue
         raise PlaywrightError(f"no time option matched {hhmm!r}")
 
-    def _fill_date(self, page, value: str) -> None:
-        """ממלא את שדה התאריך (Month DD, YY) וסוגר את לוח השנה."""
-        inp = page.locator("input[id='input.schedule.date']").first
-        inp.click(timeout=6_000)
-        inp.fill(value, timeout=6_000)
-        inp.press("Enter")
+    def _pick_date(self, page, iso_date: str) -> None:
+        """בוחר תאריך דרך לוח השנה (popover) - השדה עצמו אינו ניתן להקלדה.
+
+        פותח את ה-popover ולוחץ על תא היום. אם הבחירה נכשלת, לוח השנה נשאר
+        פתוח - כך שצילום השגיאה יראה את מבנה לוח השנה לתיקון מדויק.
+        """
+        page.locator('[id="popover-trigger-input.schedule.date"]').first.click(timeout=6_000)
+        dialog = page.locator('[id="popover-content-input.schedule.date"]').first
+        dialog.wait_for(state="visible", timeout=6_000)
+
+        day = str(int(iso_date.split("-")[2]))  # '16' בלי אפס מוביל
+        strategies = (
+            lambda: dialog.get_by_role("button", name=day, exact=True).first.click(timeout=3_000),
+            lambda: dialog.get_by_role("gridcell", name=day, exact=True).first.click(timeout=3_000),
+            lambda: dialog.locator(
+                "xpath=.//*[normalize-space(text())=" + repr(day) +
+                " and not(@disabled) and not(@aria-disabled='true')"
+                " and not(contains(@class,'outside')) and not(contains(@class,'disabled'))]"
+            ).first.click(timeout=3_000),
+        )
+        for attempt in strategies:
+            try:
+                attempt()
+                return
+            except PlaywrightError:
+                continue
+        raise PlaywrightError(f"could not click day {day} in the calendar popover")
 
     def _still_on_create_form(self, page) -> bool:
         """האם עדיין על טופס יצירת ההזמנה (כלומר השליחה לא עברה)?"""

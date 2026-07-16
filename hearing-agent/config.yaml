@@ -61,6 +61,7 @@ verbit:
   # ב-agent/verbit.py לפי תוויות הטופס (Session name / Input language וכו').
   scheduling:
     enabled: true                  # false = הדשבורד רק יציג דיונים בלי לקבוע
+    media_source: "Verbit Connect (On-Site)"  # שדה חובה: Audio source
     input_language: "Hebrew"       # שדה חובה בטופס Verbit
     output_language: "Hebrew"      # שדה חובה בטופס Verbit
     default_duration_minutes: 60   # אורך דיון כשאין שעת סיום ביומן
