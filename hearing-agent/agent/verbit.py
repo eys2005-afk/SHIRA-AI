@@ -51,6 +51,22 @@ def _verbit_date(iso_date: str) -> str:
         return iso_date
 
 
+def _time_candidates(hhmm: str) -> list[str]:
+    """פורמטים אפשריים של שעה לבחירה ב-Verbit (24 שעות ו-12 שעות AM/PM)."""
+    try:
+        h24, m = (int(x) for x in hhmm.split(":"))
+    except (ValueError, AttributeError):
+        return [hhmm]
+    h12 = h24 % 12 or 12
+    ampm = "AM" if h24 < 12 else "PM"
+    return [
+        f"{h24:02d}:{m:02d}",       # 09:00
+        f"{h12}:{m:02d} {ampm}",    # 9:00 AM
+        f"{h12:02d}:{m:02d} {ampm}",  # 09:00 AM
+        f"{h24}:{m:02d}",           # 9:00
+    ]
+
+
 def _end_time_for(hearing: Hearing, sched: dict) -> str:
     """שעת הסיום לטופס: מהיומן אם קיימת, אחרת התחלה + משך ברירת מחדל."""
     if hearing.end_time:
@@ -133,32 +149,40 @@ class BrowserVerbit:
 
                 self._step(page, "פתיחת Place new order", lambda:
                     page.get_by_role("button", name="Place new order").click(timeout=30_000))
-                page.wait_for_load_state("domcontentloaded")
+                page.locator("input[data-is-editable-input='true']").first.wait_for(
+                    state="attached", timeout=20_000)
 
+                # שם הדיון - רכיב verbit-editable: input מוסתר מאחורי preview שלוחצים עליו
                 self._step(page, "שם הדיון (Session name)", lambda:
-                    self._fill_field(page, "Session name", session_name_for(hearing)))
+                    self._fill_session_name(page, session_name_for(hearing)))
 
+                # שפות - react-select (aria-label האמיתי שונה מהתווית המוצגת)
                 self._step(page, "שפת קלט (Input language)", lambda:
-                    self._select_dropdown(page, "Input language",
-                                          sched.get("input_language", "Hebrew")))
+                    self._select_react(page, "select audio language",
+                                       sched.get("input_language", "Hebrew")))
                 self._step(page, "שפת פלט (Output language)", lambda:
-                    self._select_dropdown(page, "Output language",
-                                          sched.get("output_language", "Hebrew")))
+                    self._select_react(page, "select captions language",
+                                       sched.get("output_language", "Hebrew")))
 
-                self._step(page, "בחירת Schedule for later", lambda:
-                    page.get_by_text("Schedule for later", exact=False).first.click())
+                # "Schedule for later" הוא ברירת המחדל; לוחצים ליתר ביטחון
+                try:
+                    page.get_by_text("Schedule for later", exact=False).first.click(timeout=4_000)
+                except PlaywrightError:
+                    pass
+
                 self._step(page, "תאריך (Date)", lambda:
-                    self._fill_field(page, "Date", _verbit_date(hearing.date)))
+                    self._fill_date(page, _verbit_date(hearing.date)))
                 self._step(page, "שעת התחלה (Start time)", lambda:
-                    self._fill_field(page, "Start time", hearing.time))
+                    self._select_time(page, "pick order start time", hearing.time))
                 self._step(page, "שעת סיום (End time)", lambda:
-                    self._fill_field(page, "End time", _end_time_for(hearing, sched)))
+                    self._select_time(page, "pick order end time", _end_time_for(hearing, sched)))
 
                 if sched.get("add_parties_as_terms", True):
                     terms = ", ".join(participants_for(hearing, self.cfg))
                     if terms:
                         try:
-                            self._fill_field(page, "Terms", terms)
+                            page.locator("textarea[name='input.glossary']").first.fill(
+                                terms, timeout=5_000)
                         except PlaywrightError:
                             pass  # שדה עזר בלבד - לא מפילים על זה את הקביעה
 
@@ -212,39 +236,49 @@ class BrowserVerbit:
                 f"של הטופס ב: {path} - שלח אותם ל-Claude להתאמת ה-selector. ({first_line})"
             ) from e
 
-    def _fill_field(self, page, label: str, value: str) -> None:
-        """ממלא שדה טקסט לפי התווית שלו, עם נפילות חלופיות."""
-        candidates = (
-            page.get_by_label(label, exact=False),
-            page.get_by_placeholder(label, exact=False),
-            page.locator(
-                f"xpath=//*[normalize-space(text())='{label}']"
-                "/following::input[1] | "
-                f"//*[normalize-space(text())='{label}']/following::textarea[1]"
-            ),
-        )
-        for locator in candidates:
+    def _fill_session_name(self, page, value: str) -> None:
+        """ממלא את 'Session name' - input מוסתר ברכיב verbit-editable."""
+        page.locator(".verbit-editable__preview").first.click(timeout=6_000)
+        inp = page.locator("input[data-is-editable-input='true']").first
+        inp.fill(value, timeout=6_000)
+        inp.press("Tab")  # יציאה ממצב עריכה ואישור הערך
+
+    def _select_react(self, page, aria_label: str, value: str) -> None:
+        """פותח react-select לפי ה-aria-label, מסנן לפי טקסט, ובוחר אפשרות."""
+        ctrl = page.get_by_label(aria_label, exact=True).first
+        ctrl.click(timeout=10_000)          # מחכה גם שהשדה יהפוך פעיל (למשל שפת פלט)
+        try:
+            ctrl.fill(value, timeout=3_000)
+        except PlaywrightError:
+            page.keyboard.type(value)
+        page.get_by_role("option", name=value, exact=False).first.click(timeout=6_000)
+
+    def _select_time(self, page, aria_label: str, hhmm: str) -> None:
+        """בוחר שעה ב-react-select; מנסה מספר פורמטים (24 שעות ו-AM/PM)."""
+        ctrl = page.get_by_label(aria_label, exact=True).first
+        ctrl.click(timeout=10_000)
+        for cand in _time_candidates(hhmm):
             try:
-                locator.first.fill(value, timeout=6_000)
+                ctrl.fill(cand, timeout=2_000)
+            except PlaywrightError:
+                page.keyboard.type(cand)
+            try:
+                page.get_by_role("option", name=cand, exact=True).first.click(timeout=2_500)
                 return
             except PlaywrightError:
+                try:
+                    ctrl.fill("", timeout=1_000)
+                except PlaywrightError:
+                    pass
                 continue
-        raise PlaywrightError(f"no fillable field for label {label!r}")
+        raise PlaywrightError(f"no time option matched {hhmm!r}")
 
-    def _select_dropdown(self, page, label: str, value: str) -> None:
-        """פותח dropdown לפי התווית ובוחר אפשרות לפי טקסט (react-select וכד')."""
-        try:
-            page.get_by_label(label, exact=False).first.click(timeout=6_000)
-        except PlaywrightError:
-            page.locator(
-                f"xpath=//*[normalize-space(text())='{label}']/following::*[self::input or "
-                "self::div or self::button][1]"
-            ).first.click(timeout=6_000)
-        try:
-            page.keyboard.type(value)  # סינון ברשימות עם חיפוש
-        except PlaywrightError:
-            pass
-        page.get_by_role("option", name=value, exact=False).first.click(timeout=6_000)
+    def _fill_date(self, page, value: str) -> None:
+        """ממלא את שדה התאריך (Month DD, YY) וסוגר את לוח השנה."""
+        inp = page.locator("input[id='input.schedule.date']").first
+        inp.click(timeout=6_000)
+        inp.fill(value, timeout=6_000)
+        inp.press("Enter")
 
     def _debug_dump(self, page, tag: str) -> str:
         """שומר צילום מסך + HTML של המצב הנוכחי לצורך תיקון selector."""
