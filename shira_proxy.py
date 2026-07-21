@@ -12,6 +12,21 @@ import io
 import json
 import xml.etree.ElementTree as ET
 
+# ── Load local .env (same folder as this script) into os.environ ────────────
+def _load_env_file():
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, encoding="utf-8") as env_file:
+        for line in env_file:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+_load_env_file()
+
 # ── Kill any existing process on port 5050 before starting ───────────────────
 def _kill_port(port=5050):
     import subprocess, signal, sys
@@ -1406,9 +1421,13 @@ SHIRA = "http://shira2"
 SPFE  = "http://prod-spfe:1000"
 PROXY = "http://192.168.174.80:8080"
 
-# ↓↓↓ PUT YOUR GEMINI API KEY HERE — ONLY HERE ↓↓↓
-GEMINI_API_KEY = "AIzaSyCgutrB9sRoyQHC5mY11LiHWF505VQVD44"
-# ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+# GEMINI_API_KEY is read from the environment (or a local .env file next to
+# this script — see .env.example). Never hardcode the key here.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if not GEMINI_API_KEY:
+    print("[startup] WARNING: GEMINI_API_KEY is not set. Create a .env file "
+          "next to shira_proxy.py (see .env.example) or set the environment "
+          "variable before starting the server.")
 
 def make_session():
     s = requests.Session()
